@@ -38,7 +38,7 @@ Reading Transcriptions/
 1.  **Clone or Download:**
     Clone this repository or download and unzip the source code to your local machine.
     ```bash
-    git clone https://github.com/YOUR_USERNAME/e-reader-transcriber.git
+    git clone https://github.com/DyllonWright/E-Reader-Screenshot-Transcriber
     cd e-reader-transcriber
     ```
 
