@@ -1,2 +1,5 @@
 node_modules
 .env
+output/
+Screenshots/
+.ocr_cache/

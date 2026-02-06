@@ -13,6 +13,7 @@
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
     "dotenv": "^17.2.3",
+    "p-limit": "^7.3.0",
     "tesseract.js": "^5.1.0"
   }
 }

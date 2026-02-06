@@ -1,9 +1,16 @@
 // processScreenshots.js
 require("dotenv").config();
+
+if (!process.env.GEMINI_API_KEY) {
+  console.error("Error: GEMINI_API_KEY not found in .env file. Please create a .env file in the project root with GEMINI_API_KEY=YOUR_API_KEY.");
+  process.exit(1);
+}
+
 const fs = require("fs");
 const path = require("path");
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 const Tesseract = require("tesseract.js");
+const pLimit = require('p-limit').default;
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
@@ -85,8 +92,38 @@ async function main() {
   const baseDir = __dirname;
   const screenshotsDir = path.join(baseDir, "screenshots");
   const outputDir = path.join(baseDir, "output");
+  const ocrCacheDir = path.join(baseDir, ".ocr_cache");
+
+  // --- Start: Gemini API Key & Connectivity Diagnostic ---
+  try {
+    console.log("Verifying Gemini API key and connectivity...");
+    const testPrompt = "Hello, Gemini!";
+    const result = await model.generateContent(testPrompt);
+    const response = await result.response;
+    if (response.text().length > 0) {
+      console.log("Gemini API key and connectivity confirmed.");
+    } else {
+      console.error("Error: Gemini API test call failed to return content. Check your API key and network.");
+      process.exit(1);
+    }
+  } catch (error) {
+    console.error("Error during Gemini API key and connectivity diagnostic:");
+    console.error(error);
+    process.exit(1);
+  }
+  // --- End: Gemini API Key & Connectivity Diagnostic ---
 
   if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir);
+  if (!fs.existsSync(ocrCacheDir)) fs.mkdirSync(ocrCacheDir);
+
+  const limit = pLimit(6);
+
+  // Helper to get cache file path
+  const getOcrCachePath = (filename) =>
+    path.join(ocrCacheDir, `${filename}.json`);
+
+  // Helper to get file modification time
+  const getFileMtime = (filePath) => fs.statSync(filePath).mtimeMs;
 
   console.log("Grouping screenshots by date...");
   const dailyBatches = groupScreenshotsByDate(screenshotsDir);
@@ -97,16 +134,32 @@ async function main() {
     console.log(`\nProcessing ${batch.length} screenshots for ${date}...`);
 
     let ocrTextBatch = "";
-    const worker = await Tesseract.createWorker('eng');
-    
-    for (let i = 0; i < batch.length; i++) {
-        const item = batch[i];
-        console.log(`  (${i + 1}/${batch.length}) OCR for ${item.file}...`);
-        const { data: { text } } = await worker.recognize(item.path);
-        
-        ocrTextBatch += `[TIMESTAMP: ${item.time}]\n${text}\n---\n`;
-    }
-    await worker.terminate();
+
+    const ocrPromises = batch.map((item) => limit(async () => {
+        const cachePath = getOcrCachePath(item.file);
+        const currentMtime = getFileMtime(item.path);
+        let text = "";
+
+        if (fs.existsSync(cachePath)) {
+            const cachedData = JSON.parse(fs.readFileSync(cachePath, 'utf8'));
+            if (cachedData.mtime === currentMtime) {
+                text = cachedData.text;
+                console.log(`  (Cached) OCR for ${item.file}`);
+                return `[TIMESTAMP: ${item.time}]\n${text}\n---`;
+            }
+        }
+
+        console.log(`  (New OCR) for ${item.file}...`);
+        const worker = await Tesseract.createWorker('eng');
+        const { data: { text: ocrResult } } = await worker.recognize(item.path);
+        await worker.terminate();
+
+        fs.writeFileSync(cachePath, JSON.stringify({ text: ocrResult, mtime: currentMtime }), 'utf8');
+        return `[TIMESTAMP: ${item.time}]\n${ocrResult}\n---`;
+    }));
+
+    const ocrResults = await Promise.all(ocrPromises);
+    ocrTextBatch = ocrResults.join('\n');
 
     console.log("  → All screenshots for this date OCR'd. Sending to Gemini for formatting...");
 
