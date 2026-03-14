@@ -13,7 +13,7 @@ const Tesseract = require("tesseract.js");
 const pLimit = require('p-limit').default;
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+const model = genAI.getGenerativeModel({ model: "gemini-flash-latest" });
 
 // Parse filenames like: Screenshot_20251202_190647_Evie.jpg
 function parseDateTimeFromFilename(filename) {
@@ -159,11 +159,24 @@ async function main() {
     }));
 
     const ocrResults = await Promise.all(ocrPromises);
-    ocrTextBatch = ocrResults.join('\n');
+    
+    console.log(`  → All screenshots for this date OCR'd. Sending to Gemini in batches (max 50) for formatting...`);
 
-    console.log("  → All screenshots for this date OCR'd. Sending to Gemini for formatting...");
+    const GEMINI_BATCH_SIZE = 50;
+    let formattedTextParts = [];
 
-    const formattedText = await getFormattedTranscriptions(date, ocrTextBatch);
+    for (let i = 0; i < ocrResults.length; i += GEMINI_BATCH_SIZE) {
+      const batchStartIndex = i;
+      const batchEndIndex = Math.min(i + GEMINI_BATCH_SIZE, ocrResults.length);
+      const batchCount = batchEndIndex - batchStartIndex;
+      const currentBatch = ocrResults.slice(batchStartIndex, batchEndIndex).join('\n');
+      
+      console.log(`    → Sending batch ${Math.floor(i / GEMINI_BATCH_SIZE) + 1} (${batchCount} screenshots)...`);
+      const formattedBatch = await getFormattedTranscriptions(date, currentBatch);
+      formattedTextParts.push(formattedBatch);
+    }
+
+    const formattedText = formattedTextParts.join('\n\n');
 
     const outPath = path.join(outputDir, `${date}.md`);
     let fileContent = `# Reading – [[${date}]]\n\n`; // Always start with the header
