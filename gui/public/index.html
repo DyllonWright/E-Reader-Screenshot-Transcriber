@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>E-Reader Screenshot Transcriber</title>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- Background Gradients -->
+  <div class="bg-gradient bg-grad-1"></div>
+  <div class="bg-gradient bg-grad-2"></div>
+
+  <div class="app-container">
+    
+    <!-- Top Header -->
+    <header class="app-header">
+      <div class="brand">
+        <svg class="brand-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path>
+          <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path>
+        </svg>
+        <div class="brand-text">
+          <h1>Evie Transcriber</h1>
+          <p>E-Reader OCR & Illustration Archival Pipeline</p>
+        </div>
+      </div>
+      <div class="header-actions">
+        <button id="btn-show-explorer-header" class="btn btn-secondary btn-icon-only" title="Open Output in Explorer">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- Navigation Stepper -->
+    <div class="stepper">
+      <div class="step-indicator active" id="step-ind-config">
+        <div class="step-number">1</div>
+        <span class="step-label">Configure & Import</span>
+      </div>
+      <div class="step-line"></div>
+      <div class="step-indicator" id="step-ind-process">
+        <div class="step-number">2</div>
+        <span class="step-label">AI Processing</span>
+      </div>
+      <div class="step-line"></div>
+      <div class="step-indicator" id="step-ind-review">
+        <div class="step-number">3</div>
+        <span class="step-label">Review & Rename</span>
+      </div>
+      <div class="step-line"></div>
+      <div class="step-indicator" id="step-ind-success">
+        <div class="step-number">4</div>
+        <span class="step-label">Complete</span>
+      </div>
+    </div>
+
+    <!-- MAIN INTERACTIVE WORKSPACE -->
+    <main class="app-main">
+
+      <!-- STEP 1: CONFIGURATION & IMPORT PANEL -->
+      <section id="panel-config" class="panel active">
+        <div class="grid-2col">
+          
+          <!-- Left Column: Settings & Files Import -->
+          <div class="card glass-card scroll-container">
+            <h2 class="section-title">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="title-icon">
+                <circle cx="12" cy="12" r="3"></circle>
+                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+              </svg>
+              Settings & Import
+            </h2>
+
+            <form id="form-settings" class="settings-form">
+              <div class="form-group">
+                <label for="input-book-title">Current Book Title</label>
+                <input type="text" id="input-book-title" placeholder="e.g. Liber Null & Psychonaut" autocomplete="off">
+                <small class="form-help">Automatically pre-filled on illustrations context prompts.</small>
+              </div>
+
+              <div class="form-group">
+                <label for="input-api-key">Gemini API Key</label>
+                <div class="password-input-wrapper">
+                  <input type="password" id="input-api-key" placeholder="Enter new API key to overwrite...">
+                  <button type="button" id="btn-toggle-key" class="btn btn-secondary btn-small">Show</button>
+                </div>
+                <small id="key-status-text" class="form-help text-muted">Key is configured inside your project.</small>
+              </div>
+
+              <button type="submit" id="btn-save-settings" class="btn btn-secondary btn-full">
+                Save & Update Settings
+              </button>
+            </form>
+
+            <hr class="card-divider">
+
+            <h3 class="subsection-title">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="title-icon">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                <polyline points="17 8 12 3 7 8"></polyline>
+                <line x1="12" y1="3" x2="12" y2="15"></line>
+              </svg>
+              Screenshots Manager
+            </h3>
+
+            <!-- Load Screenshots Drag Area -->
+            <div class="upload-dropzone" id="upload-dropzone">
+              <input type="file" id="input-file-picker" multiple accept="image/*" class="hidden">
+              <svg class="dropzone-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+                <circle cx="8.5" cy="8.5" r="1.5"></circle>
+                <polyline points="21 15 16 10 5 21"></polyline>
+              </svg>
+              <div class="dropzone-text">
+                <span class="highlight">Load Screenshots</span>
+                <p>Click here to multiselect screenshot images from your Downloads or phone folder</p>
+              </div>
+            </div>
+
+            <!-- Upload progress visual -->
+            <div id="upload-progress-container" class="upload-progress-wrapper hidden">
+              <div class="upload-progress-header">
+                <span id="upload-progress-label">Uploading...</span>
+                <span id="upload-progress-percent">0%</span>
+              </div>
+              <div class="progress-bar-bg">
+                <div class="progress-bar-fill" id="upload-progress-bar" style="width: 0%;"></div>
+              </div>
+            </div>
+
+            <!-- Batch selector dropdown -->
+            <div class="form-group select-date-group">
+              <label for="select-date-batch">Choose Date Batch to Transcribe</label>
+              <select id="select-date-batch" class="select-field">
+                <option value="" disabled selected>Scanning screenshots directory...</option>
+              </select>
+            </div>
+            
+            <div id="stat-cards-wrapper" class="stat-grid hidden">
+              <div class="stat-card">
+                <span class="stat-num" id="stat-total-screens">0</span>
+                <span class="stat-label">Screenshots</span>
+              </div>
+              <div class="stat-card text-brand-purple">
+                <span class="stat-num" id="stat-text-pages">0</span>
+                <span class="stat-label">Text Pages</span>
+              </div>
+              <div class="stat-card text-brand-cyan">
+                <span class="stat-num" id="stat-illustrations">0</span>
+                <span class="stat-label">Illustrations</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Right Column: Illustration Metadata Injector -->
+          <div class="card glass-card scroll-container">
+            <h2 class="section-title">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="title-icon">
+                <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+                <circle cx="8.5" cy="8.5" r="1.5"></circle>
+                <polyline points="21 15 16 10 5 21"></polyline>
+              </svg>
+              Illustration Context Helpers
+            </h2>
+            <p class="section-desc">We found these dedicated full-screen illustrations in your batch. Type optional descriptors or context details to ensure Gemini names them with precision.</p>
+
+            <div id="illustration-helpers-list" class="illustrations-config-list">
+              <div class="empty-illustrations">
+                <p>Select a date batch or upload screenshots to identify illustrations.</p>
+              </div>
+            </div>
+
+            <div class="action-footer">
+              <button id="btn-start-processing" class="btn btn-primary btn-large btn-full" disabled>
+                Run AI Transcription & Extractor
+              </button>
+            </div>
+          </div>
+
+        </div>
+      </section>
+
+      <!-- STEP 2: PROCESSING RUN LOGS -->
+      <section id="panel-process" class="panel">
+        <div class="card glass-card log-panel-card">
+          <div class="logs-header">
+            <h2 class="section-title">
+              <div class="spinner-pulsing"></div>
+              Processing Batch Transcription
+            </h2>
+            <span class="status-badge pulse">OCR & Gemini Active</span>
+          </div>
+
+          <!-- Main Progress Bar -->
+          <div class="main-progress-wrapper">
+            <div class="progress-text-row">
+              <span id="process-step-title">Initializing...</span>
+              <span id="process-percentage">0%</span>
+            </div>
+            <div class="progress-bar-bg progress-bar-large">
+              <div class="progress-bar-fill progress-bar-animated" id="process-progress-bar" style="width: 0%;"></div>
+            </div>
+          </div>
+
+          <!-- Terminal Logs Console -->
+          <div class="terminal-container">
+            <div class="terminal-header">
+              <div class="terminal-buttons">
+                <span class="t-btn red"></span>
+                <span class="t-btn yellow"></span>
+                <span class="t-btn green"></span>
+              </div>
+              <div class="terminal-title">Evie Transcribe Engine console</div>
+            </div>
+            <div class="terminal-body" id="terminal-logs">
+              <p class="log-info">[Transcribe Console Initialized]</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- STEP 3: REVIEW & FILENAMES Overrides -->
+      <section id="panel-review" class="panel">
+        <div class="card glass-card review-panel-card scroll-container">
+          <div class="review-header">
+            <h2 class="section-title">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="title-icon">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                <polyline points="14 2 14 8 20 8"></polyline>
+                <line x1="16" y1="13" x2="8" y2="13"></line>
+                <line x1="16" y1="17" x2="8" y2="17"></line>
+                <polyline points="10 9 9 9 8 9"></polyline>
+              </svg>
+              Review & Finalize Names
+            </h2>
+            <p class="section-desc">The AI analyzed the surrounding text context and suggested these descriptive, Windows-safe filenames for the extracted full-screen illustrations. Modify them directly if desired.</p>
+          </div>
+
+          <div id="review-list-grid" class="review-grid">
+            <!-- Dynamically populated review tiles -->
+          </div>
+
+          <div class="action-footer review-footer">
+            <button id="btn-back-to-config" class="btn btn-secondary btn-large">Modify Parameters</button>
+            <button id="btn-save-finalize" class="btn btn-primary btn-large">Finalize Notes & Save Sequential Crops</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- STEP 4: SUCCESS & EXPLORER LINK -->
+      <section id="panel-success" class="panel">
+        <div class="success-card-wrapper">
+          <div class="card glass-card success-card">
+            
+            <div class="success-icon-wrapper animate-checkmark">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
+                <polyline points="20 6 9 17 4 12"></polyline>
+              </svg>
+            </div>
+
+            <h2 class="success-title">Batch Finalized Successfully!</h2>
+            <p class="success-desc">
+              Your transcriptions have been formatted, deduplicated, and appended to the daily notes. 
+              Illustrations were cropped cleanly, named descriptively, and saved sequentially in Windows with 100ms spacing.
+            </p>
+
+            <div class="success-stats">
+              <div class="stat-item">
+                <span class="label">Daily Markdown Note:</span>
+                <span class="value" id="success-output-md">2026-05-29.md</span>
+              </div>
+              <div class="stat-item">
+                <span class="label">Cropped Images Subdir:</span>
+                <span class="value" id="success-output-img-folder">2026-05-29 Extracted Images/</span>
+              </div>
+            </div>
+
+            <div class="success-actions">
+              <button id="btn-show-in-explorer-final" class="btn btn-primary btn-large btn-icon-left">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+                </svg>
+                Show in System Explorer
+              </button>
+              <button id="btn-reset-pipeline" class="btn btn-secondary btn-large">
+                Transcribe Another Batch
+              </button>
+            </div>
+            
+          </div>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

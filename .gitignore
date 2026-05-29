@@ -3,3 +3,6 @@ node_modules
 output/
 Screenshots/
 .ocr_cache/
+# Reference books (epub/txt) — keep the folder but not the content
+reference/*.epub
+reference/*.txt

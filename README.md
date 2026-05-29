@@ -1,86 +1,138 @@
 # E-Reader Screenshot Transcriber
 
-This Node.js CLI tool processes e-reader screenshots. It transcribes text, formats it for readability, and organizes daily transcriptions into Markdown files. This solution offers an efficient method for managing reading notes and personal knowledge base entries.
+A Node.js pipeline for transcribing and archiving e-reader screenshots. Combines parallel local OCR, intelligent fuzzy text deduplication, full-screen illustration extraction, and AI-powered formatting — all wrapped in a beautiful one-click local web GUI.
 
 ## Capabilities
 
-*   **Efficient Transcription:** Utilizes Tesseract.js for rapid, local Optical Character Recognition (OCR), then sends text to the Google Gemini API for intelligent cleanup and formatting.
-*   **Parallel OCR Processing:** Processes multiple screenshots concurrently, leveraging multi-core processors to significantly accelerate OCR tasks while preserving screenshot sequence.
-*   **OCR Caching:** Stores OCR results for each image. Subsequent runs reuse cached text for unchanged screenshots, drastically reducing processing time and API calls.
-*   **Batch Processing:** Groups all screenshots for a specific day, processing them in a single, streamlined operation.
-*   **Automated Daily Notes:** Organizes formatted transcriptions by date into clean Markdown files, ideal for a personal knowledge base or reading journal.
+*   **Local Web GUI:** A stunning glassmorphic browser-based interface (Esoteric Quasar Blue theme). Launch it by double-clicking `run.bat`. No installation steps needed — it self-bootstraps all dependencies on first run.
+*   **Screenshot Import:** Import screenshots directly from your Downloads folder or any directory using the browser's native file picker. Files are uploaded to `screenshots/` and OCR-cached automatically in the background.
+*   **Parallel Worker Pool OCR:** A dynamic pool of Tesseract.js workers (scaled to CPU core count) runs local OCR concurrently on all screenshots.
+*   **OCR Caching:** Stores OCR results per image. Subsequent runs reuse cached text for unchanged screenshots, making re-runs essentially instant.
+*   **Header-Based Screen Classification:** Detects the e-reader's reading header (containing "Evie", "Contents", "Read", or "Sleep") to instantly distinguish **text pages** from **full-screen illustration screenshots** — no heuristics, no word counts.
+*   **Fuzzy Overlap Deduplication:** Slides an anchor window from the tail of the previous screenshot and fuzzy-matches it against the head of the next, using a pure-JavaScript Levenshtein edit distance ratio (`fuzzRatio`). Overlapping and duplicate pages are automatically trimmed and merged into a continuous, clean transcription.
+*   **Illustration Extraction & Cropping:** Full-screen illustration screenshots are detected, background-sampled at corners, and automatically cropped to their bounding box. The crop ignores the top/bottom 8% (where UI overlays appear).
+*   **Contextual AI Naming:** All detected illustrations are bundled into a **single Gemini API call**, providing each illustration's surrounding text context and any user-supplied hints. Gemini returns descriptive, Windows-safe filenames like `YYYY MM DD Book Title Description.jpg`.
+*   **Interactive Name Review:** Before saving anything, a visual review grid displays each cropped illustration thumbnail alongside its AI-suggested filename in an editable 2-line text area. Rename them directly before finalizing.
+*   **Sequential Chronological Writes:** Crop files are written with 100ms spacing between each, guaranteeing that Windows file creation timestamps match the chronological order of the original screenshots.
+*   **Obsidian-Compatible Output:** Illustrations are embedded in the daily Markdown file using Obsidian's `![[filename.jpg]]` syntax, woven chronologically among the timestamped text entries.
+*   **Persistent Settings:** Book title and illustration context hints are saved to `meta.json` and automatically reloaded between sessions. The API key can be pasted and saved directly in the GUI, overwriting `.env`.
+*   **API Resilience:** Automatic exponential backoff retries on transient Gemini API errors (429 rate limit, 503 overload).
+*   **One-Click Explorer Access:** A "Show in System Explorer" button on the success screen instantly opens the `output/` folder in Windows File Explorer.
 
-## Tools
+## Tools & Dependencies
 
-*   **Node.js**: Runtime environment.
-*   **Tesseract.js**: Local OCR engine.
-*   **@google/generative-ai**: Official Google Gemini API client library.
-*   **dotenv**: Environment variable management.
-*   **p-limit**: Controls concurrency for parallel tasks.
+| Package | Role |
+|---|---|
+| `express` | Local web server for the GUI backend |
+| `tesseract.js` | Local OCR engine (multi-worker scheduler) |
+| `jimp` | Pure-JS image loading and bounding box cropping |
+| `@google/generative-ai` | Gemini API client (`gemini-flash-latest`) |
+| `dotenv` | Loads `GEMINI_API_KEY` from `.env` |
 
 ## Project Layout
 
 ```
-E-Reader-Screenshot-Transcriber/
-  screenshots/      <-- Place raw phone screenshots here (e.g., Screenshot_YYYYMMDD_HHMMSS_*.jpg)
-  output/           <-- Daily .md files reside here (e.g., YYYY-MM-DD.md)
-  .ocr_cache/       <-- Stores cached OCR results for rapid reprocessing
-  .env              <-- Holds your GEMINI_API_KEY
-  package.json      <-- Node.js project configuration and dependencies
-  processScreenshots.js <-- The main script for screenshot processing
+E-Reader-Screenshot-Transcriptions/
+│
+├── gui/                          ← Local web GUI (Express backend + HTML/CSS/JS frontend)
+│   ├── server.js                 ← Express server: API endpoints, OCR orchestration, Gemini calls, SSE streaming
+│   └── public/
+│       ├── index.html            ← Multi-step stepper UI (Config → Processing → Review → Success)
+│       ├── style.css             ← Glassmorphic Esoteric Quasar Blue theme, Vanilla CSS
+│       └── app.js                ← Frontend state management, file upload, SSE log listener, review grid
+│
+├── screenshots/                  ← Drop raw phone screenshots here (Screenshot_YYYYMMDD_HHMMSS_*.jpg/png)
+├── output/                       ← Daily .md files + date-named Extracted Images subdirectories
+│   ├── YYYY-MM-DD.md             ← Formatted daily Markdown with Obsidian image embeds
+│   └── YYYY-MM-DD Extracted Images/
+│       └── YYYY MM DD Book Title Description.jpg
+│
+├── .ocr_cache/                   ← JSON-cached OCR results keyed to file mtime (auto-managed)
+├── meta.json                     ← Persistent GUI state: book title, illustration context hints (auto-managed)
+├── .env                          ← Holds GEMINI_API_KEY (git-ignored)
+├── processScreenshots.js         ← Legacy CLI entrypoint (same pipeline logic, no GUI)
+├── run.bat                       ← One-click launcher: installs deps if needed, starts GUI server, opens browser
+├── package.json
+└── eng.traineddata               ← Bundled Tesseract English language model
 ```
 
-## Setup Essentials
+## Setup
 
 ### Prerequisites
 
-*   Node.js installed (LTS recommended).
-*   A Google Gemini API key. Obtain one from [Google AI Studio](https://aistudio.google.com/).
+*   Node.js (LTS recommended) — download from [nodejs.org](https://nodejs.org/)
+*   A Google Gemini API key from [Google AI Studio](https://aistudio.google.com/)
 
 ### Installation
 
-1.  **Obtain the Project:**
-    Clone this repository or download and unzip the source code to your machine.
+1.  Clone the repository:
     ```bash
     git clone https://github.com/DyllonWright/E-Reader-Screenshot-Transcriber
     cd E-Reader-Screenshot-Transcriber
     ```
 
-2.  **Install Dependencies:**
-    Execute this command in the project directory:
-    ```powershell
-    npm install
+2.  Create `.env` in the project root with your API key:
     ```
-
-3.  **Configure API Key:**
-    Create a file named `.env` in the project root. Add your Gemini API key to it:
+    GEMINI_API_KEY=YOUR_KEY_HERE
     ```
-    GEMINI_API_KEY=YOUR_REAL_API_KEY_HERE
-    ```
-    Replace `YOUR_REAL_API_KEY_HERE` with your actual key. Git ignores `.env` to prevent accidental sharing.
+    *(You can also paste and save the key directly inside the GUI on first launch.)*
 
-## Operation
+3.  Double-click `run.bat`. It will auto-install all Node.js dependencies on first run, then open the GUI in your browser.
 
-1.  **Add Screenshots:**
-    Place e-reader screenshots into the `screenshots/` directory. Files must adhere to the naming convention `Screenshot_YYYYMMDD_HHMMSS_*.jpg` or `.png` for correct date and time extraction.
+## GUI Workflow
 
-2.  **Run the Transcriber:**
-    Execute the script from the project's root directory:
-    ```powershell
-    node processScreenshots.js
-    ```
-The script logs its progress, performing parallel local OCR, utilizing cached results when available, and then sending batched text to Gemini for formatting.
+The GUI walks you through a 4-step pipeline:
 
-### Resulting Format
+**Step 1 — Configure & Import**
+- Set the current book title (saved to `meta.json` for future sessions).
+- Paste a new Gemini API key to update `.env` on-the-fly.
+- Click **Load Screenshots** to multiselect image files from your phone or Downloads folder. They are copied to `screenshots/` and OCR-cached instantly.
+- Select the date batch to process from the dropdown.
+- Optionally type context hints next to detected illustration thumbnails (e.g., *"Chaos Star Sigil"*) to help Gemini name them precisely.
+- Press **Run AI Transcription & Extractor**.
 
-The script creates or updates Markdown files in the `output/` directory. Each file carries a date as its name (e.g., `2025-12-13.md`), containing all transcriptions for that day. The format prioritizes clarity and readability:
+**Step 2 — AI Processing**
+- Watch the live retro-terminal console stream OCR reads, deduplication decisions, Gemini illustration naming (single bundled call), and Gemini text cleanup batches in real time.
+
+**Step 3 — Review & Rename**
+- Inspect each cropped illustration alongside its AI-suggested filename.
+- Edit the filename in the 2-line text area directly before saving.
+- Press **Finalize Notes & Save Sequential Crops**.
+
+**Step 4 — Complete**
+- Crops are written to `output/YYYY-MM-DD Extracted Images/` in chronological order.
+- The daily Markdown note is written to `output/YYYY-MM-DD.md`.
+- Press **Show in System Explorer** to jump straight to the output folder.
+
+## Output Format
 
 ```markdown
-# Reading – [[2025-12-13]]
+# Reading – [[2026-05-29]]
 
-**10:30:05**
-This passage of cleaned text. Paragraphs split across multiple lines in the screenshot automatically join into a single line.
+**12:34:14**
+This is the first passage of cleaned-up text, with paragraphs joined into a single line.
 
-**10:32:15**
-This second passage follows the same formatting rules, separated from the previous entry by a blank line.
+**12:34:28**
+![[2026 05 29 Liber Null Baphomet Symbol.jpg]]
+
+**12:35:19**
+This passage continues after the illustration entry above.
 ```
+
+## CLI Mode (Legacy)
+
+The original headless script still works and uses the same core pipeline:
+
+```powershell
+node processScreenshots.js
+```
+
+Place screenshots in `screenshots/`, run the command, and formatted output is written to `output/`. No GUI required. Useful for automation or batch runs.
+
+## API Quota Notes
+
+This tool uses `gemini-flash-latest` which has a free daily call limit. The pipeline is designed to be quota-efficient:
+
+- **Illustration naming**: All illustrations per day are bundled into **1 API call** (regardless of count).
+- **Text transcription**: Up to 50 OCR pages are bundled per call. A typical reading day uses **1–2 calls** total.
+- **OCR caching**: Re-runs on already-processed screenshots consume **zero additional API calls**.
