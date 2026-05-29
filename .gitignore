@@ -1,8 +1,9 @@
-node_modules
-.env
+# Folders to ignore
+node_modules/
 output/
-Screenshots/
+screenshots/
 .ocr_cache/
-# Reference books (epub/txt) — keep the folder but not the content
-reference/*.epub
-reference/*.txt
+
+# Files to ignore
+.env
+meta.json
