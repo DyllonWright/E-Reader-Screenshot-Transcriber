@@ -4,7 +4,7 @@ A Node.js pipeline for transcribing and archiving e-reader screenshots. Combines
 
 ## Capabilities
 
-*   **Local Web GUI:** A stunning glassmorphic browser-based interface (Esoteric Quasar Blue theme). Launch it by double-clicking `run.bat`. No installation steps needed — it self-bootstraps all dependencies on first run.
+*   **Local Web GUI:** A glassmorphic browser-based interface. Launch it by double-clicking `run.bat`. No installation steps needed — it self-bootstraps all dependencies on first run.
 *   **Screenshot Import:** Import screenshots directly from your Downloads folder or any directory using the browser's native file picker. Files are uploaded to `screenshots/` and OCR-cached automatically in the background.
 *   **Parallel Worker Pool OCR:** A dynamic pool of Tesseract.js workers (scaled to CPU core count) runs local OCR concurrently on all screenshots.
 *   **OCR Caching:** Stores OCR results per image. Subsequent runs reuse cached text for unchanged screenshots, making re-runs essentially instant.
@@ -38,7 +38,7 @@ E-Reader-Screenshot-Transcriptions/
 │   ├── server.js                 ← Express server: API endpoints, OCR orchestration, Gemini calls, SSE streaming
 │   └── public/
 │       ├── index.html            ← Multi-step stepper UI (Config → Processing → Review → Success)
-│       ├── style.css             ← Glassmorphic Esoteric Quasar Blue theme, Vanilla CSS
+│       ├── style.css             ← Glassmorphic dark theme, Vanilla CSS
 │       └── app.js                ← Frontend state management, file upload, SSE log listener, review grid
 │
 ├── screenshots/                  ← Drop raw phone screenshots here (Screenshot_YYYYMMDD_HHMMSS_*.jpg/png)
@@ -88,7 +88,7 @@ The GUI walks you through a 4-step pipeline:
 - Paste a new Gemini API key to update `.env` on-the-fly.
 - Click **Load Screenshots** to multiselect image files from your phone or Downloads folder. They are copied to `screenshots/` and OCR-cached instantly.
 - Select the date batch to process from the dropdown.
-- Optionally type context hints next to detected illustration thumbnails (e.g., *"Chaos Star Sigil"*) to help Gemini name them precisely.
+- Optionally type context hints next to detected illustration thumbnails (e.g., *"world map"* or *"chapter opener"*) to help Gemini name them precisely.
 - Press **Run AI Transcription & Extractor**.
 
 **Step 2 — AI Processing**
@@ -113,7 +113,7 @@ The GUI walks you through a 4-step pipeline:
 This is the first passage of cleaned-up text, with paragraphs joined into a single line.
 
 **12:34:28**
-![[2026 05 29 Liber Null Baphomet Symbol.jpg]]
+![[2026 05 29 My Book Title Chapter Map.jpg]]
 
 **12:35:19**
 This passage continues after the illustration entry above.
