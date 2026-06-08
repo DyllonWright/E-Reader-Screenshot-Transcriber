@@ -63,18 +63,21 @@ function hasReaderHeader(text) {
 }
 
 // --- Tesseract Initializer & Core Helpers ---
-let scheduler = null;
+let schedulerPromise = null;
 async function getTesseractScheduler() {
-  if (scheduler) return scheduler;
-  scheduler = Tesseract.createScheduler();
-  const numCPUs = os.cpus().length;
-  const numWorkers = Math.max(1, Math.min(4, numCPUs - 1));
-  console.log(`[Tesseract] Initializing scheduler with ${numWorkers} workers...`);
-  for (let i = 0; i < numWorkers; i++) {
-    const worker = await Tesseract.createWorker("eng");
-    scheduler.addWorker(worker);
-  }
-  return scheduler;
+  if (schedulerPromise) return schedulerPromise;
+  schedulerPromise = (async () => {
+    const s = Tesseract.createScheduler();
+    const numCPUs = os.cpus().length;
+    const numWorkers = Math.max(1, Math.min(4, numCPUs - 1));
+    console.log(`[Tesseract] Initializing scheduler with ${numWorkers} workers...`);
+    for (let i = 0; i < numWorkers; i++) {
+      const worker = await Tesseract.createWorker("eng");
+      s.addWorker(worker);
+    }
+    return s;
+  })();
+  return schedulerPromise;
 }
 
 // Perform fast background OCR for a single file if uncached
