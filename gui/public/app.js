@@ -11,6 +11,8 @@ document.addEventListener("DOMContentLoaded", () => {
     draftContent: "",
     illustrations: [] // From AI: { originalFile, suggestedName, time }
   };
+  let ocrPollTimeout = null;
+  let geminiTimerId = null;
 
   // --- DOM Elements ---
   const stepConfig = document.getElementById("step-ind-config");
@@ -94,10 +96,34 @@ document.addEventListener("DOMContentLoaded", () => {
         keyStatusText.classList.add("text-muted");
       }
 
+      // Handle Background OCR Progress Heartbeat Widget
+      const ocrCard = document.getElementById("ocr-progress-card");
+      const ocrLabel = document.getElementById("ocr-count-label");
+      const ocrFill = document.getElementById("ocr-progress-fill");
+
+      if (data.ocrActive) {
+        if (ocrCard) ocrCard.classList.remove("hidden");
+        if (ocrLabel) ocrLabel.textContent = `${data.ocrProcessed} / ${data.ocrTotal}`;
+        if (ocrFill) {
+          const percent = data.ocrTotal > 0 ? Math.round((data.ocrProcessed / data.ocrTotal) * 100) : 0;
+          ocrFill.style.width = `${percent}%`;
+        }
+        
+        // Schedule next poll
+        if (ocrPollTimeout) clearTimeout(ocrPollTimeout);
+        ocrPollTimeout = setTimeout(loadStatus, 1500);
+      } else {
+        if (ocrCard) ocrCard.classList.add("hidden");
+        if (ocrPollTimeout) {
+          clearTimeout(ocrPollTimeout);
+          ocrPollTimeout = null;
+        }
+      }
+
       // Populate Dates Dropdown
       populateDatesDropdown();
     } catch (err) {
-      alert(`Failed to load system status: ${err.message}`);
+      console.error("Failed to load system status:", err);
     }
   }
 
@@ -138,15 +164,25 @@ document.addEventListener("DOMContentLoaded", () => {
 
     const total = items.length;
     const images = items.filter(item => item.type === "image").length;
-    const texts = total - images;
+    const texts = items.filter(item => item.type === "text").length;
+    const pending = items.filter(item => item.type === "pending").length;
 
     statTotal.textContent = total;
     statText.textContent = texts;
     statImage.textContent = images;
     statWrapper.classList.remove("hidden");
 
-    // Enable Run if there are items and API Key exists
-    btnStart.disabled = total === 0;
+    // Enable Run if there are items, no pending items, and API Key exists
+    const hasPending = pending > 0;
+    const warningEl = document.getElementById("batch-pending-warning");
+    
+    if (hasPending) {
+      if (warningEl) warningEl.classList.remove("hidden");
+      btnStart.disabled = true;
+    } else {
+      if (warningEl) warningEl.classList.add("hidden");
+      btnStart.disabled = total === 0;
+    }
 
     // Render illustrations list for metadata capture
     renderIllustrationsConfig(items.filter(item => item.type === "image"));
@@ -187,7 +223,7 @@ document.addEventListener("DOMContentLoaded", () => {
           </div>
           <div class="form-group">
             <label>Context Description (Optional)</label>
-            <input type="text" class="ill-ctx-input" data-file="${img.file}" value="${img.savedContext || ''}" placeholder="e.g. Baphomet, Chaos Star Sigil, TV Parable" autocomplete="off">
+            <input type="text" class="ill-ctx-input" data-file="${img.file}" value="${img.savedContext || ''}" placeholder="e.g. Chapter title illustration, map, character sketch" autocomplete="off">
           </div>
         </div>
       `;
@@ -344,13 +380,20 @@ document.addEventListener("DOMContentLoaded", () => {
           appendLog(data.message, "info");
         } 
         else if (data.type === "progress") {
-          processStepTitle.textContent = data.message;
-          if (data.value !== undefined) {
-            processBarFill.style.width = `${data.value}%`;
-            processPercent.textContent = `${data.value}%`;
+          const isGemini = data.message.includes("Gemini") || data.message.includes("Contacting") || data.message.includes("Retrying");
+          if (isGemini) {
+            startGeminiTimer(data.message, data.value);
+          } else {
+            stopGeminiTimer();
+            processStepTitle.textContent = data.message;
+            if (data.value !== undefined) {
+              processBarFill.style.width = `${data.value}%`;
+              processPercent.textContent = `${data.value}%`;
+            }
           }
         } 
         else if (data.type === "error") {
+          stopGeminiTimer();
           appendLog(`ERROR: ${data.message}`, "error");
           processStepTitle.textContent = "Process Failed";
           sse.close();
@@ -363,6 +406,7 @@ document.addEventListener("DOMContentLoaded", () => {
           consoleLogs.appendChild(backBtn);
         } 
         else if (data.type === "complete") {
+          stopGeminiTimer();
           appendLog("AI Analysis Success!", "success");
           sse.close();
 
@@ -377,6 +421,7 @@ document.addEventListener("DOMContentLoaded", () => {
       });
 
       sse.onerror = (err) => {
+        stopGeminiTimer();
         console.error("SSE Error:", err);
         appendLog("System stream connectivity failed. Pipeline terminated.", "error");
         sse.close();
@@ -393,6 +438,29 @@ document.addEventListener("DOMContentLoaded", () => {
     p.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
     consoleLogs.appendChild(p);
     consoleLogs.scrollTop = consoleLogs.scrollHeight; // Auto-scroll
+  }
+
+  // Timer helpers for Gemini processing steps
+  function startGeminiTimer(baseMessage, progressValue) {
+    if (geminiTimerId) clearInterval(geminiTimerId);
+    const startTime = Date.now();
+    function updateMessage() {
+      const elapsed = Math.round((Date.now() - startTime) / 1000);
+      processStepTitle.textContent = `${baseMessage} (${elapsed}s)`;
+    }
+    updateMessage();
+    geminiTimerId = setInterval(updateMessage, 1000);
+    if (progressValue !== undefined) {
+      processBarFill.style.width = `${progressValue}%`;
+      processPercent.textContent = `${progressValue}%`;
+    }
+  }
+
+  function stopGeminiTimer() {
+    if (geminiTimerId) {
+      clearInterval(geminiTimerId);
+      geminiTimerId = null;
+    }
   }
 
   // 5. Review & Finalize Form Renders
@@ -461,7 +529,13 @@ document.addEventListener("DOMContentLoaded", () => {
 
       // Populate step 4 completed labels
       outputMdName.textContent = `${appState.selectedDate}.md`;
-      outputImgFolderName.textContent = `${appState.selectedDate} Extracted Images/`;
+      const imgFolderItem = document.getElementById("success-img-folder-item");
+      if (appState.illustrations && appState.illustrations.length > 0) {
+        outputImgFolderName.textContent = `${appState.selectedDate} Extracted Images/`;
+        if (imgFolderItem) imgFolderItem.classList.remove("hidden");
+      } else {
+        if (imgFolderItem) imgFolderItem.classList.add("hidden");
+      }
 
       setStepActive(stepSuccess, panelSuccess);
     } catch (err) {

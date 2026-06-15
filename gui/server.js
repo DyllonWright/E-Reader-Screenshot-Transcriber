@@ -103,15 +103,81 @@ async function ensureOcrCached(filename, filePath) {
   return text;
 }
 
+// --- Background OCR Queue & Progress Tracking ---
+let isOcrRunning = false;
+let ocrTotal = 0;
+let ocrProcessed = 0;
+
+async function runBackgroundOcr() {
+  if (isOcrRunning) return;
+  isOcrRunning = true;
+  
+  try {
+    while (true) {
+      if (!fs.existsSync(screenshotsDir)) break;
+      const files = fs.readdirSync(screenshotsDir).filter((f) => /\.(jpe?g|png)$/i.test(f));
+      
+      const uncachedFiles = [];
+      for (const file of files) {
+        const filePath = path.join(screenshotsDir, file);
+        const cachePath = path.join(ocrCacheDir, `${file}.json`);
+        let needsOcr = true;
+        
+        if (fs.existsSync(cachePath)) {
+          try {
+            const currentMtime = fs.statSync(filePath).mtimeMs;
+            const cached = JSON.parse(fs.readFileSync(cachePath, "utf8"));
+            if (cached.mtime === currentMtime) {
+              needsOcr = false;
+            }
+          } catch (e) {
+            // Corrupt cache
+          }
+        }
+        
+        if (needsOcr) {
+          uncachedFiles.push({ file, path: filePath });
+        }
+      }
+      
+      if (uncachedFiles.length === 0) break;
+      
+      ocrTotal = uncachedFiles.length;
+      ocrProcessed = 0;
+      console.log(`[Background OCR] Starting background processing of ${ocrTotal} screenshots...`);
+      
+      await Promise.all(uncachedFiles.map(async (item) => {
+        try {
+          await ensureOcrCached(item.file, item.path);
+          ocrProcessed++;
+          console.log(`[Background OCR] Progress: ${ocrProcessed}/${ocrTotal} (${item.file})`);
+        } catch (err) {
+          console.error(`[Background OCR] Error for ${item.file}:`, err);
+          ocrProcessed++;
+        }
+      }));
+    }
+  } catch (err) {
+    console.error("[Background OCR] Fatal error in runner:", err);
+  } finally {
+    isOcrRunning = false;
+    ocrTotal = 0;
+    ocrProcessed = 0;
+    console.log(`[Background OCR] Background OCR runner exited.`);
+  }
+}
+
 // --- Gemini Retries & API Config ---
-async function generateContentWithRetry(apiKey, prompt, maxRetries = 5, initialDelayMs = 2000) {
+async function generateContentWithRetry(apiKey, prompt, onStatusUpdate = null, maxRetries = 5, initialDelayMs = 2000) {
   const genAI = new GoogleGenerativeAI(apiKey);
   const model = genAI.getGenerativeModel({ model: "gemini-flash-latest" });
   
   let attempt = 0;
+  if (onStatusUpdate) onStatusUpdate("Contacting Gemini API...");
   while (true) {
     try {
       const result = await model.generateContent(prompt);
+      if (onStatusUpdate) onStatusUpdate("Response received successfully.");
       return result;
     } catch (error) {
       attempt++;
@@ -120,7 +186,9 @@ async function generateContentWithRetry(apiKey, prompt, maxRetries = 5, initialD
                           (error.message && (error.message.includes("503") || error.message.includes("429") || error.message.includes("high demand") || error.message.includes("overloaded")));
       if (isTransient) {
         const delay = initialDelayMs * Math.pow(2, attempt - 1);
-        console.warn(`[Gemini API] Failed (attempt ${attempt}). Retrying in ${delay}ms...`);
+        const warnMsg = `Transient error (${error.status || '503'}). Retrying attempt ${attempt}/${maxRetries} in ${Math.round(delay / 1000)}s...`;
+        console.warn(`[Gemini API] ${warnMsg}`);
+        if (onStatusUpdate) onStatusUpdate(warnMsg);
         await new Promise(resolve => setTimeout(resolve, delay));
       } else {
         throw error;
@@ -248,7 +316,9 @@ app.get("/api/cropped/:date/:name", (req, res) => {
 app.get("/api/status", async (req, res) => {
   try {
     const meta = readMeta();
-    const files = fs.readdirSync(screenshotsDir).filter((f) => /\.(jpe?g|png)$/i.test(f));
+    const files = fs.existsSync(screenshotsDir) 
+      ? fs.readdirSync(screenshotsDir).filter((f) => /\.(jpe?g|png)$/i.test(f))
+      : [];
     
     // Group files by date
     const dailyGroups = {};
@@ -259,33 +329,57 @@ app.get("/api/status", async (req, res) => {
       dailyGroups[dt.date].push({ file, path: path.join(screenshotsDir, file), time: dt.time });
     }
 
-    // Proactively run OCR in parallel to know which files are text vs images
     const dates = Object.keys(dailyGroups).sort();
     const resultGroups = {};
+    let totalUncached = 0;
 
     for (const date of dates) {
       const batch = dailyGroups[date];
       batch.sort((a, b) => a.file.localeCompare(b.file));
       
-      const items = await Promise.all(batch.map(async (item) => {
-        try {
-          const rawText = await ensureOcrCached(item.file, item.path);
-          const type = hasReaderHeader(rawText) ? "text" : "image";
-          const savedContext = meta.imageContexts[item.file] || "";
-          return {
-            file: item.file,
-            time: item.time,
-            type,
-            rawText: rawText.substring(0, 300), // snippet
-            savedContext
-          };
-        } catch (err) {
-          console.error(`Error parsing ${item.file}:`, err);
-          return { file: item.file, time: item.time, type: "text", rawText: "", error: err.message };
+      const items = batch.map((item) => {
+        const cachePath = path.join(ocrCacheDir, `${item.file}.json`);
+        let type = "pending";
+        let rawText = "";
+        let isCached = false;
+        
+        if (fs.existsSync(cachePath)) {
+          try {
+            const currentMtime = fs.statSync(item.path).mtimeMs;
+            const cached = JSON.parse(fs.readFileSync(cachePath, "utf8"));
+            if (cached.mtime === currentMtime) {
+              rawText = cached.text;
+              type = hasReaderHeader(rawText) ? "text" : "image";
+              isCached = true;
+            }
+          } catch (e) {
+            // Corrupt cache
+          }
         }
-      }));
+        
+        if (!isCached) {
+          totalUncached++;
+        }
+
+        const savedContext = meta.imageContexts[item.file] || "";
+        return {
+          file: item.file,
+          time: item.time,
+          type,
+          rawText: rawText ? rawText.substring(0, 300) : "",
+          savedContext,
+          isPending: !isCached
+        };
+      });
 
       resultGroups[date] = items;
+    }
+
+    // Proactively run background OCR if there are uncached screenshots
+    if (totalUncached > 0 && !isOcrRunning) {
+      runBackgroundOcr().catch((err) => {
+        console.error("Error in background OCR runner startup:", err);
+      });
     }
 
     const apiKey = process.env.GEMINI_API_KEY || "";
@@ -295,7 +389,11 @@ app.get("/api/status", async (req, res) => {
       apiKeyPresent: apiKey.length > 0,
       apiKeyMasked: apiKey.length > 0 ? `${apiKey.slice(0, 6)}...${apiKey.slice(-4)}` : "",
       dates,
-      groups: resultGroups
+      groups: resultGroups,
+      ocrActive: isOcrRunning || totalUncached > 0,
+      ocrTotal: isOcrRunning ? ocrTotal : totalUncached,
+      ocrProcessed: isOcrRunning ? ocrProcessed : 0,
+      totalUncached
     });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -491,7 +589,10 @@ Return ONLY a JSON array of objects with this exact structure (no markdown fence
 ]`;
 
       try {
-        const result = await generateContentWithRetry(apiKey, prompt);
+        const result = await generateContentWithRetry(apiKey, prompt, (statusMsg) => {
+          sendEvent("log", `  [Gemini Naming] ${statusMsg}`);
+          sendEvent("progress", `Gemini Naming: ${statusMsg}`, { value: 30 });
+        });
         const responseText = result.response.text();
         const cleanedText = responseText.replace(/```json/g, "").replace(/```/g, "").trim();
         const suggestedList = JSON.parse(cleanedText);
@@ -610,7 +711,11 @@ ${chunk}
 Return ONLY the formatted text. Do not add any extra titles, commentary, or introductions.`;
 
       try {
-        const result = await generateContentWithRetry(apiKey, prompt);
+        const batchNum = Math.floor(i / GEMINI_BATCH_SIZE) + 1;
+        const result = await generateContentWithRetry(apiKey, prompt, (statusMsg) => {
+          sendEvent("log", `  [Gemini Batch ${batchNum}] ${statusMsg}`);
+          sendEvent("progress", `Gemini Batch ${batchNum}: ${statusMsg}`, { value: 30 + Math.round((i / ocrResults.length) * 50) });
+        });
         const text = result.response.text().trim();
         formattedTextParts.push(text);
         sendEvent("progress", `Gemini batch: ${Math.floor(i / GEMINI_BATCH_SIZE) + 1} done`, { value: 30 + Math.round(((i + chunk.length) / ocrResults.length) * 50) });
@@ -652,8 +757,10 @@ app.post("/api/finalize", async (req, res) => {
 
   try {
     const testOutputDir = path.join(outputDir, `${date} Extracted Images`);
-    if (!fs.existsSync(testOutputDir)) {
-      fs.mkdirSync(testOutputDir, { recursive: true });
+    if (illustrations && illustrations.length > 0) {
+      if (!fs.existsSync(testOutputDir)) {
+        fs.mkdirSync(testOutputDir, { recursive: true });
+      }
     }
 
     // 1. Process & Crop Illustrations sequentially
@@ -697,10 +804,13 @@ app.post("/api/finalize", async (req, res) => {
         const bgG = (bgHex >> 16) & 0xff;
         const bgB = (bgHex >> 8) & 0xff;
 
-        let minX = width, maxX = 0, minY = height, maxY = 0;
         const threshold = 15;
         const startY = Math.floor(height * 0.08);
         const endY = Math.floor(height * 0.92);
+
+        // Compute column and row activity profiles
+        const colActive = new Int32Array(width);
+        const rowActive = new Int32Array(height);
 
         for (let y = startY; y < endY; y++) {
           for (let x = 0; x < width; x++) {
@@ -711,12 +821,73 @@ app.post("/api/finalize", async (req, res) => {
 
             const diff = Math.abs(r - bgR) + Math.abs(g - bgG) + Math.abs(b - bgB);
             if (diff > threshold) {
-              if (x < minX) minX = x;
-              if (x > maxX) maxX = x;
-              if (y < minY) minY = y;
-              if (y > maxY) maxY = y;
+              colActive[x]++;
+              rowActive[y]++;
             }
           }
+        }
+
+        // Helper to find intervals of activity
+        function findIntervals(activityArray, startIdx, endIdx, noiseThreshold, maxGap) {
+          const intervals = [];
+          let currentInterval = null;
+
+          for (let i = startIdx; i < endIdx; i++) {
+            const isActive = activityArray[i] > noiseThreshold;
+            if (isActive) {
+              if (!currentInterval) {
+                currentInterval = { start: i, end: i };
+              } else {
+                currentInterval.end = i;
+              }
+            } else {
+              if (currentInterval) {
+                let gapIsLarge = true;
+                // Peek ahead to see if active pixels resume within maxGap
+                for (let g = 1; g <= maxGap && i + g < endIdx; g++) {
+                  if (activityArray[i + g] > noiseThreshold) {
+                    gapIsLarge = false;
+                    break;
+                  }
+                }
+                if (gapIsLarge) {
+                  intervals.push(currentInterval);
+                  currentInterval = null;
+                }
+              }
+            }
+          }
+          if (currentInterval) {
+            intervals.push(currentInterval);
+          }
+          return intervals;
+        }
+
+        // Noise thresholds: ignore columns/rows with very few active pixels
+        const colNoise = Math.max(2, Math.floor((endY - startY) * 0.005));
+        const rowNoise = Math.max(2, Math.floor(width * 0.005));
+
+        // Max gap to merge parts of the same illustration
+        const colMaxGap = Math.floor(width * 0.02);
+        const rowMaxGap = Math.floor(height * 0.05);
+
+        const xIntervals = findIntervals(colActive, 0, width, colNoise, colMaxGap);
+        const yIntervals = findIntervals(rowActive, startY, endY, rowNoise, rowMaxGap);
+
+        let minX = 0, maxX = -1;
+        if (xIntervals.length > 0) {
+          // Sort descending by interval width to find the largest contiguous content block
+          xIntervals.sort((a, b) => (b.end - b.start) - (a.end - a.start));
+          minX = xIntervals[0].start;
+          maxX = xIntervals[0].end;
+        }
+
+        let minY = startY, maxY = -1;
+        if (yIntervals.length > 0) {
+          // Sort descending by interval height
+          yIntervals.sort((a, b) => (b.end - b.start) - (a.end - a.start));
+          minY = yIntervals[0].start;
+          maxY = yIntervals[0].end;
         }
 
         if (maxX >= minX && maxY >= minY) {

@@ -76,6 +76,21 @@
               Settings & Import
             </h2>
 
+            <!-- Background OCR Progress Card -->
+            <div id="ocr-progress-card" class="ocr-progress-card hidden">
+              <div class="ocr-card-header">
+                <div class="ocr-status-group">
+                  <div class="spinner-pulsing"></div>
+                  <span class="ocr-title">Analyzing New Screenshots...</span>
+                </div>
+                <span id="ocr-count-label" class="ocr-count-label">0 / 0</span>
+              </div>
+              <div class="progress-bar-bg">
+                <div id="ocr-progress-fill" class="progress-bar-fill progress-bar-animated" style="width: 0%;"></div>
+              </div>
+              <p id="ocr-hint" class="ocr-hint">Scanning and indexing files for transcription</p>
+            </div>
+
             <form id="form-settings" class="settings-form">
               <div class="form-group">
                 <label for="input-book-title">Current Book Title</label>
@@ -139,6 +154,16 @@
               <select id="select-date-batch" class="select-field">
                 <option value="" disabled selected>Scanning screenshots directory...</option>
               </select>
+            </div>
+
+            <!-- Warning for pending analysis -->
+            <div id="batch-pending-warning" class="batch-warning hidden">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
+                <line x1="12" y1="9" x2="12" y2="13"></line>
+                <line x1="12" y1="17" x2="12.01" y2="17"></line>
+              </svg>
+              <span>Some screenshots in this batch are still being analyzed. Please wait...</span>
             </div>
             
             <div id="stat-cards-wrapper" class="stat-grid hidden">
@@ -274,7 +299,7 @@
                 <span class="label">Daily Markdown Note:</span>
                 <span class="value" id="success-output-md">2026-05-29.md</span>
               </div>
-              <div class="stat-item">
+              <div class="stat-item" id="success-img-folder-item">
                 <span class="label">Cropped Images Subdir:</span>
                 <span class="value" id="success-output-img-folder">2026-05-29 Extracted Images/</span>
               </div>

@@ -418,14 +418,13 @@ async function main() {
           const bgG = (bgHex >> 16) & 0xff;
           const bgB = (bgHex >> 8) & 0xff;
 
-          let minX = width;
-          let maxX = 0;
-          let minY = height;
-          let maxY = 0;
-
           const threshold = 15;
           const startY = Math.floor(height * 0.08);
           const endY = Math.floor(height * 0.92);
+
+          // Compute column and row activity profiles
+          const colActive = new Int32Array(width);
+          const rowActive = new Int32Array(height);
 
           for (let y = startY; y < endY; y++) {
             for (let x = 0; x < width; x++) {
@@ -436,18 +435,78 @@ async function main() {
 
               const diff = Math.abs(r - bgR) + Math.abs(g - bgG) + Math.abs(b - bgB);
               if (diff > threshold) {
-                if (x < minX) minX = x;
-                if (x > maxX) maxX = x;
-                if (y < minY) minY = y;
-                if (y > maxY) maxY = y;
+                colActive[x]++;
+                rowActive[y]++;
               }
             }
+          }
+
+          // Helper to find intervals of activity
+          function findIntervals(activityArray, startIdx, endIdx, noiseThreshold, maxGap) {
+            const intervals = [];
+            let currentInterval = null;
+
+            for (let i = startIdx; i < endIdx; i++) {
+              const isActive = activityArray[i] > noiseThreshold;
+              if (isActive) {
+                if (!currentInterval) {
+                  currentInterval = { start: i, end: i };
+                } else {
+                  currentInterval.end = i;
+                }
+              } else {
+                if (currentInterval) {
+                  let gapIsLarge = true;
+                  // Peek ahead to see if active pixels resume within maxGap
+                  for (let g = 1; g <= maxGap && i + g < endIdx; g++) {
+                    if (activityArray[i + g] > noiseThreshold) {
+                      gapIsLarge = false;
+                      break;
+                    }
+                  }
+                  if (gapIsLarge) {
+                    intervals.push(currentInterval);
+                    currentInterval = null;
+                  }
+                }
+              }
+            }
+            if (currentInterval) {
+              intervals.push(currentInterval);
+            }
+            return intervals;
+          }
+
+          // Noise thresholds: ignore columns/rows with very few active pixels
+          const colNoise = Math.max(2, Math.floor((endY - startY) * 0.005));
+          const rowNoise = Math.max(2, Math.floor(width * 0.005));
+
+          // Max gap to merge parts of the same illustration
+          const colMaxGap = Math.floor(width * 0.02);
+          const rowMaxGap = Math.floor(height * 0.05);
+
+          const xIntervals = findIntervals(colActive, 0, width, colNoise, colMaxGap);
+          const yIntervals = findIntervals(rowActive, startY, endY, rowNoise, rowMaxGap);
+
+          let minX = 0, maxX = -1;
+          if (xIntervals.length > 0) {
+            // Sort descending by interval width to find the largest contiguous content block
+            xIntervals.sort((a, b) => (b.end - b.start) - (a.end - a.start));
+            minX = xIntervals[0].start;
+            maxX = xIntervals[0].end;
+          }
+
+          let minY = startY, maxY = -1;
+          if (yIntervals.length > 0) {
+            // Sort descending by interval height
+            yIntervals.sort((a, b) => (b.end - b.start) - (a.end - a.start));
+            minY = yIntervals[0].start;
+            maxY = yIntervals[0].end;
           }
 
           if (maxX >= minX && maxY >= minY) {
             const cropW = maxX - minX + 1;
             const cropH = maxY - minY + 1;
-            
             image.crop({ x: minX, y: minY, w: cropW, h: cropH });
             const outPath = path.join(testOutputDir, filename);
             await image.write(outPath);
