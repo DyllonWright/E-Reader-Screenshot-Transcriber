@@ -202,8 +202,53 @@ async function generateContentWithRetry(prompt, maxRetries = 5, initialDelayMs =
   }
 }
 
-function hasReaderHeader(text) {
-  return /Evie/i.test(text) || /Contents/i.test(text) || /Sleep/i.test(text);
+const TARGET_BLUE = { r: 63, g: 72, b: 99 };   // #3f4863
+const TARGET_GREEN = { r: 60, g: 94, b: 81 };  // #3c5e51
+
+function colorDistance(c1, c2) {
+  return Math.sqrt((c1.r - c2.r)**2 + (c1.g - c2.g)**2 + (c1.b - c2.b)**2);
+}
+
+function checkHeaderColors(image) {
+  const w = image.bitmap.width;
+  const h = image.bitmap.height;
+  const midX = Math.floor(w / 2);
+
+  let foundBlue = false;
+  let foundGreen = false;
+
+  const yBlueStart = Math.floor(h * 0.06);
+  const yBlueEnd = Math.floor(h * 0.10);
+  const yGreenStart = Math.floor(h * 0.09);
+  const yGreenEnd = Math.floor(h * 0.14);
+
+  // Scan for blue
+  for (let y = yBlueStart; y <= yBlueEnd; y++) {
+    const color = image.getPixelColor(midX, y);
+    const r = (color >> 24) & 0xff;
+    const g = (color >> 16) & 0xff;
+    const b = (color >> 8) & 0xff;
+    
+    if (colorDistance({ r, g, b }, TARGET_BLUE) < 25) {
+      foundBlue = true;
+      break;
+    }
+  }
+
+  // Scan for green
+  for (let y = yGreenStart; y <= yGreenEnd; y++) {
+    const color = image.getPixelColor(midX, y);
+    const r = (color >> 24) & 0xff;
+    const g = (color >> 16) & 0xff;
+    const b = (color >> 8) & 0xff;
+    
+    if (colorDistance({ r, g, b }, TARGET_GREEN) < 25) {
+      foundGreen = true;
+      break;
+    }
+  }
+
+  return foundBlue && foundGreen;
 }
 
 async function getIllustrationFilename(date, prevText, nextText, index) {
@@ -335,25 +380,52 @@ async function main() {
         const currentMtime = getFileMtime(item.path);
 
         if (fs.existsSync(cachePath)) {
-            const cachedData = JSON.parse(fs.readFileSync(cachePath, 'utf8'));
-            if (cachedData.mtime === currentMtime) {
-                console.log(`  (Cached) OCR for ${item.file}`);
-                return { ...item, rawText: cachedData.text };
+            try {
+                const cachedData = JSON.parse(fs.readFileSync(cachePath, 'utf8'));
+                if (cachedData.mtime === currentMtime) {
+                    if (cachedData.isTextPage !== undefined) {
+                        console.log(`  (Cached) OCR for ${item.file}`);
+                        return { ...item, rawText: cachedData.text, isTextPage: cachedData.isTextPage };
+                    } else {
+                        // Text cached but missing color classification, compute and update cache
+                        console.log(`  (Cached OCR, updating color check) for ${item.file}`);
+                        let isText = false;
+                        try {
+                            const image = await Jimp.read(item.path);
+                            isText = checkHeaderColors(image);
+                        } catch (err) {
+                            console.error(`Error checking header colors for ${item.file}:`, err);
+                        }
+                        fs.writeFileSync(cachePath, JSON.stringify({ text: cachedData.text, isTextPage: isText, mtime: currentMtime }), 'utf8');
+                        return { ...item, rawText: cachedData.text, isTextPage: isText };
+                    }
+                }
+            } catch (e) {
+                // Corrupt cache file
             }
         }
 
         console.log(`  (New OCR) scheduling for ${item.file}...`);
         const { data: { text: ocrResult } } = await scheduler.addJob('recognize', item.path);
-        fs.writeFileSync(cachePath, JSON.stringify({ text: ocrResult, mtime: currentMtime }), 'utf8');
+        
+        let isText = false;
+        try {
+            const image = await Jimp.read(item.path);
+            isText = checkHeaderColors(image);
+        } catch (err) {
+            console.error(`Error checking header colors for ${item.file}:`, err);
+        }
+        
+        fs.writeFileSync(cachePath, JSON.stringify({ text: ocrResult, isTextPage: isText, mtime: currentMtime }), 'utf8');
         console.log(`  (New OCR) completed for ${item.file}`);
-        return { ...item, rawText: ocrResult };
+        return { ...item, rawText: ocrResult, isTextPage: isText };
     });
 
     const ocrItems = await Promise.all(ocrPromises);
 
-    // Classify screenshots chronologically
+    // Classify screenshots chronologically using the cached header-color result
     for (const item of ocrItems) {
-      item.type = hasReaderHeader(item.rawText) ? "text" : "image";
+      item.type = item.isTextPage ? "text" : "image";
     }
 
     // Process and crop image screenshots locally

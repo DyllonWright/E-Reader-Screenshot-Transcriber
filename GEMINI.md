@@ -3,7 +3,7 @@
 This project is a pipeline for processing e-reader screenshots. It uses a multi-stage pipeline:
 
 1. **Local OCR** — Tesseract.js reads each screenshot and extracts raw text, cached per file.
-2. **Screen Classification** — Screenshots are classified as `text` or `image` (full-screen illustration) based on the presence of the e-reader's reading header.
+2. **Screen Classification** — Each screenshot classifies as `text` or `image` (full-screen illustration) by reading the reader header's blue/green band colors from the pixels (`checkHeaderColors`), cached per file as `isTextPage`.
 3. **Fuzzy Deduplication** — Adjacent text screenshots are fuzzy-matched and merged to eliminate scroll-overlap duplicates.
 4. **Illustration Extraction** — Full-screen illustration screenshots are auto-cropped using Jimp corner-pixel background detection.
 5. **Gemini Formatting** — OCR text is sent to Gemini (in batches of ≤50 pages) for cleanup and formatting. Illustration namings are bundled into a single API call.
@@ -81,7 +81,7 @@ Place screenshots in `screenshots/`, run the command. Output goes to `output/`.
 ## Development Conventions
 
 *   **Screenshot filename pattern:** `Screenshot_YYYYMMDD_HHMMSS_*.jpg` or `.png`
-*   **Header detection:** OCR text containing `"Evie"`, `"Contents"`, `"Sleep"`, or `"Read"` → text page. Absence of header → full-screen illustration.
+*   **Header detection (`checkHeaderColors`):** center-column pixels show the header's blue band `#3f4863` (y 6–10%) and green band `#3c5e51` (y 9–14%), matched within RGB distance 25 → text page; either band absent → full-screen illustration. Cached as `isTextPage`; classification no longer reads OCR words.
 *   **Gemini model:** `gemini-flash-latest` — free-tier quota-efficient. Update in **both** `gui/server.js` and `processScreenshots.js` if changing.
 *   **API quota design:** Illustration naming = 1 call/day total (all bundled). Text cleanup = 1–2 calls/day at ≤50 pages per batch.
 *   **Output format:** `# Reading – [[YYYY-MM-DD]]` header, bold `**HH:MM:SS**` timestamp per entry, `![[filename.jpg]]` for illustrations.

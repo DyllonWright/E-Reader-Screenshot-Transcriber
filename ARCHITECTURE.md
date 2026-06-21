@@ -31,7 +31,7 @@ Both modes share the same core processing logic. The GUI server re-implements th
 │
 ├── screenshots/            Input: raw phone screenshots (Screenshot_YYYYMMDD_HHMMSS_*.jpg/.png)
 ├── output/                 Output: YYYY-MM-DD.md daily notes + YYYY-MM-DD Extracted Images/ subdirs
-├── .ocr_cache/             Auto-managed JSON cache: {text, mtime} per screenshot filename
+├── .ocr_cache/             Auto-managed JSON cache: {text, isTextPage, mtime} per screenshot filename
 ├── meta.json               Auto-managed GUI persistence: {bookTitle, imageContexts}
 ├── .env                    Secret: GEMINI_API_KEY (git-ignored, can be overwritten via GUI)
 └── eng.traineddata         Bundled Tesseract English language model (required by tesseract.js)
@@ -52,7 +52,7 @@ Browser (app.js)
         ├── Reads screenshots/ directory
         ├── Groups files by date (parseDateTimeFromFilename)
         ├── Runs parallel OCR via Tesseract scheduler (ensureOcrCached)
-        ├── Classifies each screenshot: text or image (hasReaderHeader)
+        ├── Classifies each screenshot: text or image (checkHeaderColors → cached isTextPage)
         └── Returns: { dates, groups, bookTitle, apiKeyPresent }
 
 User selects date, optionally imports files, types illustration hints
@@ -97,8 +97,9 @@ User clicks "Show in System Explorer"
 | Function | Purpose |
 |---|---|
 | `parseDateTimeFromFilename(filename)` | Extracts `{date, time}` from `Screenshot_YYYYMMDD_HHMMSS_*.jpg` |
-| `hasReaderHeader(text)` | Returns `true` if OCR text contains "Evie", "Contents", "Sleep", or "Read" — classifies as **text page** |
-| `ensureOcrCached(filename, filePath)` | Checks `.ocr_cache/{filename}.json` for matching mtime; runs Tesseract and writes cache on miss |
+| `checkHeaderColors(image)` | Samples the center column for the reader header's blue (`#3f4863`) and green (`#3c5e51`) bands; returns `true` (**text page**) only when both appear |
+| `colorDistance(c1, c2)` | Euclidean RGB distance, used by `checkHeaderColors` with a match threshold of `< 25` |
+| `ensureOcrCached(filename, filePath)` | Checks `.ocr_cache/{filename}.json` for matching mtime; on miss runs Tesseract **and** `checkHeaderColors`, writes `{text, isTextPage, mtime}`; returns `{text, isTextPage}` |
 | `getTesseractScheduler()` | Lazily initializes a shared Tesseract scheduler with `min(4, cpus-1)` workers |
 | `generateContentWithRetry(apiKey, prompt, maxRetries)` | Wraps Gemini `generateContent` with exponential backoff on 429/503 |
 | `findOverlapFuzzy(prevText, newText)` | Fuzzy-matches the tail of prev against the head of new to detect/trim scroll overlaps |
@@ -107,7 +108,7 @@ User clicks "Show in System Explorer"
 
 ### `processScreenshots.js` (CLI)
 
-Contains the same algorithms (fuzzRatio, findOverlapFuzzy, hasReaderHeader, getIllustrationFilename, getFormattedTranscriptions). The main difference is that illustration naming makes **one call per image** (not batched) and there is no interactive review step. If you improve the core algorithms, update **both files**.
+Contains the same algorithms (fuzzRatio, findOverlapFuzzy, checkHeaderColors, getIllustrationFilename, getFormattedTranscriptions). The main difference: illustration naming makes **one call per image** (not batched) and offers no interactive review step. If you improve the core algorithms, update **both files**.
 
 ---
 
@@ -177,15 +178,23 @@ To update the theme, change only the `:root` variables — all component styles 
 
 ## Illustration Detection Logic
 
-The key insight: the Evie e-reader always shows a top bar (book title + menu buttons) when reading text. When an illustration goes full-screen, that header disappears.
+The key insight: the Evie e-reader always paints a top bar when reading text — a blue status band above a green chapter-progress band. When an illustration goes full-screen, both bands disappear. Detection reads those two header colors directly from the pixels rather than from OCR text, so it no longer depends on which words a page happens to contain.
 
 ```
-hasReaderHeader(ocrText)
-  → true  (contains "Evie"|"Contents"|"Sleep"|"Read")  → TEXT page
-  → false                                              → IMAGE page (full-screen illustration)
+checkHeaderColors(image)            // samples the vertical center column, x = width/2
+  ├── blue band  #3f4863 (rgb 63,72,99)  within y ∈ [6%, 10%] of height
+  └── green band #3c5e51 (rgb 60,94,81)  within y ∈ [9%, 14%] of height
+        match = Euclidean RGB distance < 25
+
+  → both bands found   → TEXT page  (isTextPage = true)
+  → either band absent → IMAGE page (full-screen illustration, isTextPage = false)
 ```
 
-This means **no word count heuristics, no pixel analysis for detection** — header presence is the sole classifier. Cropping logic uses Jimp to find the bounding box of non-background pixels (sampled from image corners), ignoring the top and bottom 8% of height where on-screen UI overlays may appear.
+The result caches as `isTextPage` alongside the OCR text, so OCR content never gates the classification — a sparse or near-empty reading page (the original false-positive bug) still classifies as text because its header bands remain. `isTextPage` is the **sole** classifier across every code path (`/api/status`, `/api/process-stream`, and the CLI). Legacy cache entries written before this scheme carry no `isTextPage`; the pipeline detects that, recomputes `checkHeaderColors`, and writes the flag back on next read.
+
+> **Why color, not OCR words:** the earlier classifier keyed on header *words* ("Evie", "Contents", "Sleep", "Read") in the OCR output. Chapter starts, quote screens, and tables of contents hide the header text — and a page with little body text yields few words — so genuine text pages fell through to "image." Reading the header *band colors* keys on a UI element present on every reading page regardless of text content.
+
+Cropping logic (separate from detection) uses Jimp to find the bounding box of non-background pixels (sampled from image corners), ignoring the top and bottom 8% of height where on-screen UI overlays may appear.
 
 ---
 

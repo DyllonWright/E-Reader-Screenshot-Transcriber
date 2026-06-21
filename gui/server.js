@@ -58,8 +58,53 @@ function parseDateTimeFromFilename(filename) {
   return { date, time };
 }
 
-function hasReaderHeader(text) {
-  return /Evie/i.test(text) || /Contents/i.test(text) || /Sleep/i.test(text) || /Read/i.test(text);
+const TARGET_BLUE = { r: 63, g: 72, b: 99 };   // #3f4863
+const TARGET_GREEN = { r: 60, g: 94, b: 81 };  // #3c5e51
+
+function colorDistance(c1, c2) {
+  return Math.sqrt((c1.r - c2.r)**2 + (c1.g - c2.g)**2 + (c1.b - c2.b)**2);
+}
+
+function checkHeaderColors(image) {
+  const w = image.bitmap.width;
+  const h = image.bitmap.height;
+  const midX = Math.floor(w / 2);
+
+  let foundBlue = false;
+  let foundGreen = false;
+
+  const yBlueStart = Math.floor(h * 0.06);
+  const yBlueEnd = Math.floor(h * 0.10);
+  const yGreenStart = Math.floor(h * 0.09);
+  const yGreenEnd = Math.floor(h * 0.14);
+
+  // Scan for blue
+  for (let y = yBlueStart; y <= yBlueEnd; y++) {
+    const color = image.getPixelColor(midX, y);
+    const r = (color >> 24) & 0xff;
+    const g = (color >> 16) & 0xff;
+    const b = (color >> 8) & 0xff;
+    
+    if (colorDistance({ r, g, b }, TARGET_BLUE) < 25) {
+      foundBlue = true;
+      break;
+    }
+  }
+
+  // Scan for green
+  for (let y = yGreenStart; y <= yGreenEnd; y++) {
+    const color = image.getPixelColor(midX, y);
+    const r = (color >> 24) & 0xff;
+    const g = (color >> 16) & 0xff;
+    const b = (color >> 8) & 0xff;
+    
+    if (colorDistance({ r, g, b }, TARGET_GREEN) < 25) {
+      foundGreen = true;
+      break;
+    }
+  }
+
+  return foundBlue && foundGreen;
 }
 
 // --- Tesseract Initializer & Core Helpers ---
@@ -84,23 +129,53 @@ async function getTesseractScheduler() {
 async function ensureOcrCached(filename, filePath) {
   const cachePath = path.join(ocrCacheDir, `${filename}.json`);
   const currentMtime = fs.statSync(filePath).mtimeMs;
+  let cachedText = null;
+  let cachedIsTextPage = null;
 
   if (fs.existsSync(cachePath)) {
     try {
       const cached = JSON.parse(fs.readFileSync(cachePath, "utf8"));
       if (cached.mtime === currentMtime) {
-        return cached.text;
+        cachedText = cached.text;
+        cachedIsTextPage = cached.isTextPage;
       }
     } catch (e) {
       // Corrupt cache file, re-run
     }
   }
 
-  console.log(`[OCR Cache Miss] Running OCR for: ${filename}`);
+  // If fully cached (text + classification), return both
+  if (cachedText !== null && cachedIsTextPage !== undefined) {
+    return { text: cachedText, isTextPage: cachedIsTextPage };
+  }
+
+  // If text is cached but missing classification, perform color analysis and write back to cache
+  if (cachedText !== null && cachedIsTextPage === undefined) {
+    let isText = false;
+    try {
+      const image = await Jimp.read(filePath);
+      isText = checkHeaderColors(image);
+    } catch (err) {
+      console.error(`Error checking header colors for ${filename}:`, err);
+    }
+    fs.writeFileSync(cachePath, JSON.stringify({ text: cachedText, isTextPage: isText, mtime: currentMtime }), "utf8");
+    return { text: cachedText, isTextPage: isText };
+  }
+
+  console.log(`[OCR Cache Miss] Running OCR & pixel analysis for: ${filename}`);
   const activeScheduler = await getTesseractScheduler();
   const { data: { text } } = await activeScheduler.addJob("recognize", filePath);
-  fs.writeFileSync(cachePath, JSON.stringify({ text, mtime: currentMtime }), "utf8");
-  return text;
+
+  let isText = false;
+  try {
+    const image = await Jimp.read(filePath);
+    isText = checkHeaderColors(image);
+  } catch (err) {
+    console.error(`Error checking header colors for ${filename}:`, err);
+  }
+
+  fs.writeFileSync(cachePath, JSON.stringify({ text, isTextPage: isText, mtime: currentMtime }), "utf8");
+  return { text, isTextPage: isText };
 }
 
 // --- Background OCR Queue & Progress Tracking ---
@@ -347,9 +422,9 @@ app.get("/api/status", async (req, res) => {
           try {
             const currentMtime = fs.statSync(item.path).mtimeMs;
             const cached = JSON.parse(fs.readFileSync(cachePath, "utf8"));
-            if (cached.mtime === currentMtime) {
+            if (cached.mtime === currentMtime && cached.isTextPage !== undefined) {
               rawText = cached.text;
-              type = hasReaderHeader(rawText) ? "text" : "image";
+              type = cached.isTextPage ? "text" : "image";
               isCached = true;
             }
           } catch (e) {
@@ -504,8 +579,8 @@ app.get("/api/process-stream", async (req, res) => {
     const ocrItems = [];
     for (let i = 0; i < dayFiles.length; i++) {
       const item = dayFiles[i];
-      const text = await ensureOcrCached(item.file, item.path);
-      const type = hasReaderHeader(text) ? "text" : "image";
+      const { text, isTextPage } = await ensureOcrCached(item.file, item.path);
+      const type = isTextPage ? "text" : "image";
       ocrItems.push({ ...item, rawText: text, type });
       sendEvent("progress", `OCR read: ${i + 1}/${dayFiles.length}`, { value: Math.round(((i + 1) / dayFiles.length) * 30) });
     }
