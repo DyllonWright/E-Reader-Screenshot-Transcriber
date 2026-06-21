@@ -8,3 +8,4 @@ screenshots/
 .env
 meta.json
 *.ini
+/.claude
