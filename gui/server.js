@@ -27,11 +27,13 @@ const screenshotsDir = path.join(projectRoot, "screenshots");
 const outputDir      = path.join(projectRoot, "output");
 const ocrCacheDir    = path.join(projectRoot, ".ocr_cache");
 const metaFilePath   = path.join(projectRoot, "meta.json");
+const pipelineCacheDir = path.join(projectRoot, ".pipeline_cache");
 
 // Ensure baseline directories exist
 if (!fs.existsSync(screenshotsDir)) fs.mkdirSync(screenshotsDir, { recursive: true });
 if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
 if (!fs.existsSync(ocrCacheDir)) fs.mkdirSync(ocrCacheDir, { recursive: true });
+if (!fs.existsSync(pipelineCacheDir)) fs.mkdirSync(pipelineCacheDir, { recursive: true });
 
 // --- Persistent State Helpers ---
 function readMeta() {
@@ -106,6 +108,131 @@ function checkHeaderColors(image) {
 
   return foundBlue && foundGreen;
 }
+
+// Helper to calculate auto-crop boundaries based on content bounding box detection
+function getAutoCropCoordinates(image) {
+  const width = image.bitmap.width;
+  const height = image.bitmap.height;
+
+  // Sample corners to detect background color
+  const corners = [
+    image.getPixelColor(10, 10),
+    image.getPixelColor(width - 10, 10),
+    image.getPixelColor(10, height - 10),
+    image.getPixelColor(width - 10, height - 10)
+  ];
+  
+  const counts = {};
+  let bgHex = corners[0];
+  let maxCount = 0;
+  for (const color of corners) {
+    counts[color] = (counts[color] || 0) + 1;
+    if (counts[color] > maxCount) {
+      maxCount = counts[color];
+      bgHex = color;
+    }
+  }
+
+  const bgR = (bgHex >> 24) & 0xff;
+  const bgG = (bgHex >> 16) & 0xff;
+  const bgB = (bgHex >> 8) & 0xff;
+
+  const threshold = 15;
+  const startY = Math.floor(height * 0.08);
+  const endY = Math.floor(height * 0.92);
+
+  // Compute column and row activity profiles
+  const colActive = new Int32Array(width);
+  const rowActive = new Int32Array(height);
+
+  for (let y = startY; y < endY; y++) {
+    for (let x = 0; x < width; x++) {
+      const idx = (y * width + x) * 4;
+      const r = image.bitmap.data[idx];
+      const g = image.bitmap.data[idx + 1];
+      const b = image.bitmap.data[idx + 2];
+
+      const diff = Math.abs(r - bgR) + Math.abs(g - bgG) + Math.abs(b - bgB);
+      if (diff > threshold) {
+        colActive[x]++;
+        rowActive[y]++;
+      }
+    }
+  }
+
+  // Helper to find intervals of activity
+  function findIntervals(activityArray, startIdx, endIdx, noiseThreshold, maxGap) {
+    const intervals = [];
+    let currentInterval = null;
+
+    for (let i = startIdx; i < endIdx; i++) {
+      const isActive = activityArray[i] > noiseThreshold;
+      if (isActive) {
+        if (!currentInterval) {
+          currentInterval = { start: i, end: i };
+        } else {
+          currentInterval.end = i;
+        }
+      } else {
+        if (currentInterval) {
+          let gapIsLarge = true;
+          // Peek ahead to see if active pixels resume within maxGap
+          for (let g = 1; g <= maxGap && i + g < endIdx; g++) {
+            if (activityArray[i + g] > noiseThreshold) {
+              gapIsLarge = false;
+              break;
+            }
+          }
+          if (gapIsLarge) {
+            intervals.push(currentInterval);
+            currentInterval = null;
+          }
+        }
+      }
+    }
+    if (currentInterval) {
+      intervals.push(currentInterval);
+    }
+    return intervals;
+  }
+
+  // Noise thresholds: ignore columns/rows with very few active pixels
+  const colNoise = Math.max(2, Math.floor((endY - startY) * 0.005));
+  const rowNoise = Math.max(2, Math.floor(width * 0.005));
+
+  // Max gap to merge parts of the same illustration
+  const colMaxGap = Math.floor(width * 0.02);
+  const rowMaxGap = Math.floor(height * 0.05);
+
+  const xIntervals = findIntervals(colActive, 0, width, colNoise, colMaxGap);
+  const yIntervals = findIntervals(rowActive, startY, endY, rowNoise, rowMaxGap);
+
+  let minX = 0, maxX = -1;
+  if (xIntervals.length > 0) {
+    // Sort descending by interval width to find the largest contiguous content block
+    xIntervals.sort((a, b) => (b.end - b.start) - (a.end - a.start));
+    minX = xIntervals[0].start;
+    maxX = xIntervals[0].end;
+  }
+
+  let minY = startY, maxY = -1;
+  if (yIntervals.length > 0) {
+    // Sort descending by interval height
+    yIntervals.sort((a, b) => (b.end - b.start) - (a.end - a.start));
+    minY = yIntervals[0].start;
+    maxY = yIntervals[0].end;
+  }
+
+  if (maxX >= minX && maxY >= minY) {
+    const cropW = maxX - minX + 1;
+    const cropH = maxY - minY + 1;
+    return { x: minX, y: minY, w: cropW, h: cropH };
+  }
+
+  // Fallback to full screen if bounds calculation failed
+  return { x: 0, y: startY, w: width, h: endY - startY };
+}
+
 
 // --- Tesseract Initializer & Core Helpers ---
 let schedulerPromise = null;
@@ -406,12 +533,16 @@ app.get("/api/status", async (req, res) => {
 
     const dates = Object.keys(dailyGroups).sort();
     const resultGroups = {};
+    const datesInfo = [];
     let totalUncached = 0;
 
     for (const date of dates) {
       const batch = dailyGroups[date];
       batch.sort((a, b) => a.file.localeCompare(b.file));
       
+      const totalFiles = batch.length;
+      let ocrCachedCount = 0;
+
       const items = batch.map((item) => {
         const cachePath = path.join(ocrCacheDir, `${item.file}.json`);
         let type = "pending";
@@ -426,6 +557,7 @@ app.get("/api/status", async (req, res) => {
               rawText = cached.text;
               type = cached.isTextPage ? "text" : "image";
               isCached = true;
+              ocrCachedCount++;
             }
           } catch (e) {
             // Corrupt cache
@@ -448,6 +580,37 @@ app.get("/api/status", async (req, res) => {
       });
 
       resultGroups[date] = items;
+
+      // Determine batch status: completed (green), paused (yellow), ocr_done (red), ocr_active (black)
+      let status = "ocr_active";
+      if (ocrCachedCount === totalFiles) {
+        const cacheFilePath = path.join(pipelineCacheDir, `${date}.json`);
+        const finalMdPath = path.join(outputDir, `${date}.md`);
+        
+        if (fs.existsSync(cacheFilePath)) {
+          try {
+            const cacheData = JSON.parse(fs.readFileSync(cacheFilePath, "utf8"));
+            if (cacheData.status === "completed" && fs.existsSync(finalMdPath)) {
+              status = "completed";
+            } else if (cacheData.draftContent) {
+              status = "paused";
+            } else {
+              status = "ocr_done";
+            }
+          } catch (e) {
+            status = "ocr_done";
+          }
+        } else {
+          status = "ocr_done";
+        }
+      }
+
+      datesInfo.push({
+        date,
+        totalFiles,
+        ocrCachedCount,
+        status
+      });
     }
 
     // Proactively run background OCR if there are uncached screenshots
@@ -464,6 +627,7 @@ app.get("/api/status", async (req, res) => {
       apiKeyPresent: apiKey.length > 0,
       apiKeyMasked: apiKey.length > 0 ? `${apiKey.slice(0, 6)}...${apiKey.slice(-4)}` : "",
       dates,
+      datesInfo,
       groups: resultGroups,
       ocrActive: isOcrRunning || totalUncached > 0,
       ocrTotal: isOcrRunning ? ocrTotal : totalUncached,
@@ -472,6 +636,26 @@ app.get("/api/status", async (req, res) => {
     });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Load saved pipeline cache for a specific date batch
+app.get("/api/load-cache", (req, res) => {
+  const { date } = req.query;
+  if (!date) {
+    return res.status(400).json({ success: false, error: "Missing date parameter" });
+  }
+
+  const cacheFilePath = path.join(pipelineCacheDir, `${date}.json`);
+  if (fs.existsSync(cacheFilePath)) {
+    try {
+      const cacheData = JSON.parse(fs.readFileSync(cacheFilePath, "utf8"));
+      res.json({ success: true, cache: cacheData });
+    } catch (err) {
+      res.status(500).json({ success: false, error: "Failed to parse cache: " + err.message });
+    }
+  } else {
+    res.status(404).json({ success: false, error: "No cache found for date: " + date });
   }
 });
 
@@ -803,16 +987,50 @@ Return ONLY the formatted text. Do not add any extra titles, commentary, or intr
     const formattedOutput = formattedTextParts.join('\n\n');
     sendEvent("log", "Process completed. Forwarding to review...");
 
-    // Send final structure containing proposed filenames and draft content
+    // Send final structure containing proposed filenames, draft content, and crop coordinates
+    const illustrationsList = [];
+    for (const item of ocrItems.filter(item => item.type === "image")) {
+      let suggestedCrop = null;
+      let width = 0;
+      let height = 0;
+      try {
+        const imgPath = path.join(screenshotsDir, item.file);
+        const image = await Jimp.read(imgPath);
+        width = image.bitmap.width;
+        height = image.bitmap.height;
+        suggestedCrop = getAutoCropCoordinates(image);
+      } catch (err) {
+        console.error(`Error calculating pre-crop for ${item.file}:`, err);
+      }
+      illustrationsList.push({
+        originalFile: item.file,
+        suggestedName: item.illustrationFilename,
+        time: item.time,
+        suggestedCrop,
+        originalWidth: width,
+        originalHeight: height
+      });
+    }
+
     const reviewData = {
       date,
       draftContent: formattedOutput,
-      illustrations: ocrItems.filter(item => item.type === "image").map(item => ({
-        originalFile: item.file,
-        suggestedName: item.illustrationFilename,
-        time: item.time
-      }))
+      illustrations: illustrationsList
     };
+
+    // Save initial pipeline cache to allow resumption
+    try {
+      const cacheData = {
+        date,
+        bookTitle: meta.bookTitle || "",
+        draftContent: formattedOutput,
+        illustrations: illustrationsList,
+        status: "paused"
+      };
+      fs.writeFileSync(path.join(pipelineCacheDir, `${date}.json`), JSON.stringify(cacheData, null, 2), "utf8");
+    } catch (err) {
+      console.error(`Error writing pipeline cache for ${date}:`, err);
+    }
 
     sendEvent("complete", "Batch analyzed successfully!", { reviewData });
     res.end();
@@ -831,6 +1049,7 @@ app.post("/api/finalize", async (req, res) => {
   }
 
   try {
+    const meta = readMeta(); // needed for bookTitle in cache update
     const testOutputDir = path.join(outputDir, `${date} Extracted Images`);
     if (illustrations && illustrations.length > 0) {
       if (!fs.existsSync(testOutputDir)) {
@@ -856,119 +1075,30 @@ app.post("/api/finalize", async (req, res) => {
         const width = image.bitmap.width;
         const height = image.bitmap.height;
 
-        // Sample corners to detect background color
-        const corners = [
-          image.getPixelColor(10, 10),
-          image.getPixelColor(width - 10, 10),
-          image.getPixelColor(10, height - 10),
-          image.getPixelColor(width - 10, height - 10)
-        ];
-        
-        const counts = {};
-        let bgHex = corners[0];
-        let maxCount = 0;
-        for (const color of corners) {
-          counts[color] = (counts[color] || 0) + 1;
-          if (counts[color] > maxCount) {
-            maxCount = counts[color];
-            bgHex = color;
+        let finalCrop = null;
+
+        if (item.crop && typeof item.crop.x === 'number' && typeof item.crop.y === 'number' && typeof item.crop.w === 'number' && typeof item.crop.h === 'number') {
+          // Use user-provided crop coordinates
+          finalCrop = {
+            x: Math.max(0, Math.min(width - 1, Math.round(item.crop.x))),
+            y: Math.max(0, Math.min(height - 1, Math.round(item.crop.y))),
+            w: Math.max(1, Math.min(width, Math.round(item.crop.w))),
+            h: Math.max(1, Math.min(height, Math.round(item.crop.h)))
+          };
+        } else {
+          // Fall back to auto-crop calculation
+          finalCrop = getAutoCropCoordinates(image);
+        }
+
+        if (finalCrop) {
+          // Clamp crop dimensions to make sure we don't exceed image boundaries
+          if (finalCrop.x + finalCrop.w > width) {
+            finalCrop.w = width - finalCrop.x;
           }
-        }
-
-        const bgR = (bgHex >> 24) & 0xff;
-        const bgG = (bgHex >> 16) & 0xff;
-        const bgB = (bgHex >> 8) & 0xff;
-
-        const threshold = 15;
-        const startY = Math.floor(height * 0.08);
-        const endY = Math.floor(height * 0.92);
-
-        // Compute column and row activity profiles
-        const colActive = new Int32Array(width);
-        const rowActive = new Int32Array(height);
-
-        for (let y = startY; y < endY; y++) {
-          for (let x = 0; x < width; x++) {
-            const idx = (y * width + x) * 4;
-            const r = image.bitmap.data[idx];
-            const g = image.bitmap.data[idx + 1];
-            const b = image.bitmap.data[idx + 2];
-
-            const diff = Math.abs(r - bgR) + Math.abs(g - bgG) + Math.abs(b - bgB);
-            if (diff > threshold) {
-              colActive[x]++;
-              rowActive[y]++;
-            }
+          if (finalCrop.y + finalCrop.h > height) {
+            finalCrop.h = height - finalCrop.y;
           }
-        }
-
-        // Helper to find intervals of activity
-        function findIntervals(activityArray, startIdx, endIdx, noiseThreshold, maxGap) {
-          const intervals = [];
-          let currentInterval = null;
-
-          for (let i = startIdx; i < endIdx; i++) {
-            const isActive = activityArray[i] > noiseThreshold;
-            if (isActive) {
-              if (!currentInterval) {
-                currentInterval = { start: i, end: i };
-              } else {
-                currentInterval.end = i;
-              }
-            } else {
-              if (currentInterval) {
-                let gapIsLarge = true;
-                // Peek ahead to see if active pixels resume within maxGap
-                for (let g = 1; g <= maxGap && i + g < endIdx; g++) {
-                  if (activityArray[i + g] > noiseThreshold) {
-                    gapIsLarge = false;
-                    break;
-                  }
-                }
-                if (gapIsLarge) {
-                  intervals.push(currentInterval);
-                  currentInterval = null;
-                }
-              }
-            }
-          }
-          if (currentInterval) {
-            intervals.push(currentInterval);
-          }
-          return intervals;
-        }
-
-        // Noise thresholds: ignore columns/rows with very few active pixels
-        const colNoise = Math.max(2, Math.floor((endY - startY) * 0.005));
-        const rowNoise = Math.max(2, Math.floor(width * 0.005));
-
-        // Max gap to merge parts of the same illustration
-        const colMaxGap = Math.floor(width * 0.02);
-        const rowMaxGap = Math.floor(height * 0.05);
-
-        const xIntervals = findIntervals(colActive, 0, width, colNoise, colMaxGap);
-        const yIntervals = findIntervals(rowActive, startY, endY, rowNoise, rowMaxGap);
-
-        let minX = 0, maxX = -1;
-        if (xIntervals.length > 0) {
-          // Sort descending by interval width to find the largest contiguous content block
-          xIntervals.sort((a, b) => (b.end - b.start) - (a.end - a.start));
-          minX = xIntervals[0].start;
-          maxX = xIntervals[0].end;
-        }
-
-        let minY = startY, maxY = -1;
-        if (yIntervals.length > 0) {
-          // Sort descending by interval height
-          yIntervals.sort((a, b) => (b.end - b.start) - (a.end - a.start));
-          minY = yIntervals[0].start;
-          maxY = yIntervals[0].end;
-        }
-
-        if (maxX >= minX && maxY >= minY) {
-          const cropW = maxX - minX + 1;
-          const cropH = maxY - minY + 1;
-          image.crop({ x: minX, y: minY, w: cropW, h: cropH });
+          image.crop({ x: finalCrop.x, y: finalCrop.y, w: finalCrop.w, h: finalCrop.h });
         }
         
         // Write the cropped file
@@ -1006,6 +1136,39 @@ app.post("/api/finalize", async (req, res) => {
 
     finalFileContent += finalMarkdownContent;
     fs.writeFileSync(finalMdPath, finalFileContent, "utf8");
+
+    // Update pipeline cache status to completed
+    try {
+      const cacheFilePath = path.join(pipelineCacheDir, `${date}.json`);
+      let existingCache = {};
+      if (fs.existsSync(cacheFilePath)) {
+        existingCache = JSON.parse(fs.readFileSync(cacheFilePath, "utf8"));
+      }
+
+      // Merge incoming finalized illustrations names and crop coordinates back into the cache
+      const mergedIllustrations = (existingCache.illustrations || []).map(existingItem => {
+        const incomingItem = illustrations.find(item => item.originalFile === existingItem.originalFile);
+        if (incomingItem) {
+          return {
+            ...existingItem,
+            suggestedName: incomingItem.finalizedName,
+            crop: incomingItem.crop
+          };
+        }
+        return existingItem;
+      });
+
+      const cacheData = {
+        date,
+        bookTitle: meta.bookTitle || existingCache.bookTitle || "",
+        draftContent: draftContent,
+        illustrations: mergedIllustrations.length > 0 ? mergedIllustrations : illustrations,
+        status: "completed"
+      };
+      fs.writeFileSync(cacheFilePath, JSON.stringify(cacheData, null, 2), "utf8");
+    } catch (err) {
+      console.error(`Error updating pipeline cache to completed for ${date}:`, err);
+    }
 
     res.json({ success: true, message: `Perfect sequential finalize complete! Written: output/${date}.md` });
   } catch (err) {

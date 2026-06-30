@@ -9,3 +9,4 @@ screenshots/
 meta.json
 *.ini
 /.claude
+/.pipeline_cache

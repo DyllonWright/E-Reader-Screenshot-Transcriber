@@ -148,12 +148,12 @@
               </div>
             </div>
 
-            <!-- Batch selector dropdown -->
+            <!-- Batch list selector -->
             <div class="form-group select-date-group">
-              <label for="select-date-batch">Choose Date Batch to Transcribe</label>
-              <select id="select-date-batch" class="select-field">
-                <option value="" disabled selected>Scanning screenshots directory...</option>
-              </select>
+              <label>Select Date Batch to Process</label>
+              <div id="batch-list-container" class="batch-list-container">
+                <div class="batch-loading-placeholder">Scanning screenshots batch directories...</div>
+              </div>
             </div>
 
             <!-- Warning for pending analysis -->
@@ -251,7 +251,7 @@
 
       <!-- STEP 3: REVIEW & FILENAMES Overrides -->
       <section id="panel-review" class="panel">
-        <div class="card glass-card review-panel-card scroll-container">
+        <div class="card glass-card review-panel-card">
           <div class="review-header">
             <h2 class="section-title">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="title-icon">
@@ -322,6 +322,42 @@
       </section>
 
     </main>
+  </div>
+
+  <!-- Manual Crop Modal -->
+  <div id="crop-modal" class="modal-overlay hidden">
+    <div class="modal-card glass-card">
+      <div class="modal-header">
+        <h3 class="section-title">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="title-icon">
+            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+            <path d="M8.5 20V8.5H20"></path>
+          </svg>
+          Adjust Crop Region
+        </h3>
+        <button id="btn-close-modal" class="btn-close">&times;</button>
+      </div>
+      <div class="modal-body-crop">
+        <div class="crop-workspace-hint">
+          Drag the box to move. Drag the corner handles to resize.
+        </div>
+        <div class="crop-editor-container-wrapper">
+          <div id="crop-editor-container" class="crop-editor-container">
+            <img id="crop-editor-img" src="" alt="Cropping Workspace">
+            <div id="crop-editor-box" class="crop-editor-box">
+              <span class="crop-handle handle-tl"></span>
+              <span class="crop-handle handle-tr"></span>
+              <span class="crop-handle handle-bl"></span>
+              <span class="crop-handle handle-br"></span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button id="btn-cancel-crop" class="btn btn-secondary">Cancel</button>
+        <button id="btn-save-crop" class="btn btn-primary">Save Crop Region</button>
+      </div>
+    </div>
   </div>
 
   <script src="app.js"></script>
