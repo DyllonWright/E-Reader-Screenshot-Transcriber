@@ -4,9 +4,12 @@ document.addEventListener("DOMContentLoaded", () => {
   // --- Application State ---
   let appState = {
     bookTitle: "",
+    recentBooks: [],
     apiKeyPresent: false,
     dates: [],
     datesInfo: [],
+    archivedInfo: [],
+    totalScreenshots: 0,
     groups: {},
     selectedDate: "",
     draftContent: "",
@@ -14,6 +17,7 @@ document.addEventListener("DOMContentLoaded", () => {
   };
   let ocrPollTimeout = null;
   let geminiTimerId = null;
+  let archiveSse = null;
 
   // --- DOM Elements ---
   const stepConfig = document.getElementById("step-ind-config");
@@ -38,12 +42,36 @@ document.addEventListener("DOMContentLoaded", () => {
   const btnToggleKey = document.getElementById("btn-toggle-key");
   const keyStatusText = document.getElementById("key-status-text");
 
-  const dropzone = document.getElementById("upload-dropzone");
+  const inputFolderBar = document.getElementById("input-folder-bar");
   const filePicker = document.getElementById("input-file-picker");
+  const ifbCount = document.getElementById("ifb-count");
+  const btnRefreshBatches = document.getElementById("btn-refresh-batches");
+  const btnOpenInput = document.getElementById("btn-open-input");
+  const recentBooksEl = document.getElementById("recent-books");
   const uploadProgressContainer = document.getElementById("upload-progress-container");
   const uploadProgressFill = document.getElementById("upload-progress-bar");
   const uploadProgressLabel = document.getElementById("upload-progress-label");
   const uploadProgressPercent = document.getElementById("upload-progress-percent");
+
+  // Archived batches strip
+  const archivedSection = document.getElementById("archived-section");
+  const archivedRecent = document.getElementById("archived-recent");
+  const archivedRest = document.getElementById("archived-rest");
+  const btnShowFullArchive = document.getElementById("btn-show-full-archive");
+  const archiveFlagLabel = document.getElementById("archive-flag-label");
+
+  // Stage 4 cleanup
+  const cleanupCountEl = document.getElementById("cleanup-count");
+  const cleanupDateEl = document.getElementById("cleanup-date");
+  const cleanupActions = document.getElementById("cleanup-actions");
+  const cleanupProgress = document.getElementById("cleanup-progress");
+  const cleanupProgressLabel = document.getElementById("cleanup-progress-label");
+  const cleanupProgressCount = document.getElementById("cleanup-progress-count");
+  const cleanupProgressBar = document.getElementById("cleanup-progress-bar");
+  const cleanupDone = document.getElementById("cleanup-done");
+  const btnArchiveFinish = document.getElementById("btn-archive-finish");
+  const btnDeleteRecycle = document.getElementById("btn-delete-recycle");
+  const btnSkipCleanup = document.getElementById("btn-skip-cleanup");
 
   const illustrationsList = document.getElementById("illustration-helpers-list");
   const btnStart = document.getElementById("btn-start-processing");
@@ -67,8 +95,11 @@ document.addEventListener("DOMContentLoaded", () => {
   const btnResetPipeline = document.getElementById("btn-reset-pipeline");
 
   // --- Initialization ---
+  generateStarfield();
   loadStatus();
   setupUploads();
+  setupSlimBar();
+  setupCleanup();
   setupEventListeners();
 
   // --- API Integrations ---
@@ -81,13 +112,21 @@ document.addEventListener("DOMContentLoaded", () => {
       if (!data.success) throw new Error(data.error);
 
       appState.bookTitle = data.bookTitle;
+      appState.recentBooks = data.recentBooks || [];
       appState.apiKeyPresent = data.apiKeyPresent;
       appState.dates = data.dates;
       appState.datesInfo = data.datesInfo || [];
+      appState.archivedInfo = data.archivedInfo || [];
       appState.groups = data.groups;
- 
-      // Populate Settings Inputs
-      inputBookTitle.value = data.bookTitle;
+      appState.totalScreenshots = (data.datesInfo || []).reduce((sum, d) => sum + (d.totalFiles || 0), 0);
+
+      // Populate Settings Inputs (don't clobber the field while the user is editing it)
+      if (document.activeElement !== inputBookTitle) {
+        inputBookTitle.value = data.bookTitle;
+      }
+      if (ifbCount) ifbCount.textContent = appState.totalScreenshots;
+      renderRecentBooks();
+      renderArchivedSection();
       if (data.apiKeyPresent) {
         keyStatusText.textContent = `Active Key: ${data.apiKeyMasked}`;
         keyStatusText.classList.remove("text-muted");
@@ -135,11 +174,10 @@ document.addEventListener("DOMContentLoaded", () => {
     batchListContainer.innerHTML = "";
 
     if (appState.datesInfo.length === 0) {
-      batchListContainer.innerHTML = `
-        <div class="batch-loading-placeholder">
-          No screenshots found. Drag/drop image files to import.
-        </div>
-      `;
+      const hasArchive = appState.archivedInfo.length > 0;
+      batchListContainer.innerHTML = hasArchive
+        ? `<div class="batch-empty-hint">✨ All caught up — nothing waiting to process.<br>Recently archived batches are listed below.</div>`
+        : `<div class="batch-empty-hint">No screenshots in the input folder yet.<br>Drop today's screenshots into the folder, then hit <b>Refresh</b>.</div>`;
       btnStart.disabled = true;
       statWrapper.classList.add("hidden");
       renderEmptyIllustrations();
@@ -148,25 +186,25 @@ document.addEventListener("DOMContentLoaded", () => {
 
     appState.datesInfo.forEach(info => {
       const card = document.createElement("div");
-      card.className = `batch-card${info.date === selected ? ' selected' : ''}`;
+      card.className = `batch-card status-${info.status}${info.date === selected ? ' selected' : ''}`;
       card.dataset.date = info.date;
 
       let statusBadgeHtml = "";
       let progressBarHtml = "";
 
       if (info.status === "completed") {
-        statusBadgeHtml = `<span class="batch-status-badge batch-status-completed">🟢 Finalized</span>`;
+        statusBadgeHtml = `<span class="batch-status-badge batch-status-completed">🟣 Finalized</span>`;
       } else if (info.status === "paused") {
-        statusBadgeHtml = `<span class="batch-status-badge batch-status-paused">🟡 Resume Draft</span>`;
+        statusBadgeHtml = `<span class="batch-status-badge batch-status-paused">🟠 Resume Draft</span>`;
       } else if (info.status === "ocr_done") {
-        statusBadgeHtml = `<span class="batch-status-badge batch-status-ocr_done">🔴 OCR Ready</span>`;
+        statusBadgeHtml = `<span class="batch-status-badge batch-status-ocr_done">🟢 Ready</span>`;
       } else {
-        statusBadgeHtml = `<span class="batch-status-badge batch-status-ocr_active">⚫ OCR Underway</span>`;
+        statusBadgeHtml = `<span class="batch-status-badge batch-status-ocr_active">🔵 Analyzing…</span>`;
         const percent = info.totalFiles > 0 ? Math.round((info.ocrCachedCount / info.totalFiles) * 100) : 0;
         progressBarHtml = `
           <div class="batch-card-progress">
             <div class="batch-progress-info">
-              <span>OCR Progress</span>
+              <span>OCR heartbeat</span>
               <span>${info.ocrCachedCount} / ${info.totalFiles} (${percent}%)</span>
             </div>
             <div class="batch-progress-bar-bg">
@@ -204,6 +242,91 @@ document.addEventListener("DOMContentLoaded", () => {
       statWrapper.classList.add("hidden");
       renderEmptyIllustrations();
     }
+  }
+
+  // Render the clickable "recently used books" chips (queue of 3)
+  function renderRecentBooks() {
+    if (!recentBooksEl) return;
+    const books = appState.recentBooks || [];
+    if (books.length === 0) {
+      recentBooksEl.classList.add("hidden");
+      recentBooksEl.innerHTML = "";
+      return;
+    }
+    recentBooksEl.classList.remove("hidden");
+    recentBooksEl.innerHTML = "";
+    books.forEach(title => {
+      const chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = `recent-book-chip${title === appState.bookTitle ? ' active' : ''}`;
+      chip.textContent = title;
+      chip.title = `Switch current book to: ${title}`;
+      chip.addEventListener("click", () => switchBook(title));
+      recentBooksEl.appendChild(chip);
+    });
+  }
+
+  // Switch the active book (fills the field + persists immediately)
+  async function switchBook(title) {
+    inputBookTitle.value = title;
+    try {
+      const res = await fetch("/api/settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ bookTitle: title })
+      });
+      const data = await res.json();
+      if (!data.success) throw new Error(data.error);
+      appState.bookTitle = title;
+      loadStatus();
+    } catch (err) {
+      console.error("Failed to switch book:", err);
+    }
+  }
+
+  // Render the "recently archived" strip: up to 3 recent + a flag to expand the rest
+  function renderArchivedSection() {
+    if (!archivedSection) return;
+    const archived = appState.archivedInfo || [];
+    if (archived.length === 0) {
+      archivedSection.classList.add("hidden");
+      archivedRecent.innerHTML = "";
+      archivedRest.innerHTML = "";
+      btnShowFullArchive.classList.add("hidden");
+      return;
+    }
+
+    archivedSection.classList.remove("hidden");
+    const recent = archived.slice(0, 3);
+    const rest = archived.slice(3);
+
+    archivedRecent.innerHTML = recent.map(archivedCardHtml).join("");
+    if (rest.length > 0) {
+      archivedRest.innerHTML = rest.map(archivedCardHtml).join("");
+      btnShowFullArchive.classList.remove("hidden");
+      if (archiveFlagLabel && archivedRest.classList.contains("hidden")) {
+        archiveFlagLabel.textContent = `Show full archive (${rest.length} more)`;
+      }
+    } else {
+      archivedRest.innerHTML = "";
+      archivedRest.classList.add("hidden");
+      btnShowFullArchive.classList.add("hidden");
+    }
+  }
+
+  function archivedCardHtml(info) {
+    const modeLabel = info.mode === "delete" ? "Recycled" : "Archived";
+    const when = info.archivedAt ? new Date(info.archivedAt).toLocaleDateString() : "";
+    const files = info.fileCount ? `${info.fileCount} screenshots` : "cleared";
+    return `
+      <div class="archived-card" title="${modeLabel}${when ? ' on ' + when : ''}">
+        <div class="archived-card-left">
+          <span class="archived-card-date">${info.date}</span>
+          <span class="archived-card-meta">${modeLabel} · ${files}${when ? ' · ' + when : ''}</span>
+        </div>
+        <span class="batch-status-badge batch-status-archived">⚪ ${modeLabel}</span>
+      </div>
+    `;
   }
 
   // Handle batch selection change
@@ -334,31 +457,53 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // 3. HTML5 Multi-image selector upload
   function setupUploads() {
-    // Click dropzone triggers file picker
-    dropzone.addEventListener("click", () => filePicker.click());
+    if (!inputFolderBar) return;
 
-    // File picker selection
+    // Hidden file picker still works as a rare manual-import fallback
     filePicker.addEventListener("change", () => {
       const files = Array.from(filePicker.files);
       if (files.length > 0) uploadFiles(files);
     });
 
-    // Drag and Drop
-    dropzone.addEventListener("dragover", (e) => {
+    // Quiet drag-and-drop onto the slim bar (the usual workflow is ctrl+X into the folder)
+    inputFolderBar.addEventListener("dragover", (e) => {
       e.preventDefault();
-      dropzone.classList.add("dragover");
+      inputFolderBar.classList.add("dragover");
     });
 
-    dropzone.addEventListener("dragleave", () => {
-      dropzone.classList.remove("dragover");
+    inputFolderBar.addEventListener("dragleave", () => {
+      inputFolderBar.classList.remove("dragover");
     });
 
-    dropzone.addEventListener("drop", (e) => {
+    inputFolderBar.addEventListener("drop", (e) => {
       e.preventDefault();
-      dropzone.classList.remove("dragover");
+      inputFolderBar.classList.remove("dragover");
       const files = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith("image/"));
       if (files.length > 0) uploadFiles(files);
     });
+  }
+
+  // Slim-bar controls: refresh (rescan input folder) + open input folder + archive expand
+  function setupSlimBar() {
+    if (btnRefreshBatches) {
+      btnRefreshBatches.addEventListener("click", () => {
+        btnRefreshBatches.classList.add("spinning");
+        loadStatus();
+        setTimeout(() => btnRefreshBatches.classList.remove("spinning"), 700);
+      });
+    }
+    if (btnOpenInput) {
+      btnOpenInput.addEventListener("click", () => openSystemExplorer("input"));
+    }
+    if (btnShowFullArchive) {
+      btnShowFullArchive.addEventListener("click", () => {
+        const nowHidden = archivedRest.classList.toggle("hidden");
+        const count = archivedRest.querySelectorAll(".archived-card").length;
+        if (archiveFlagLabel) {
+          archiveFlagLabel.textContent = nowHidden ? `Show full archive (${count} more)` : "Hide full archive";
+        }
+      });
+    }
   }
 
   // Upload sequential batch files via AJAX Base64
@@ -908,6 +1053,7 @@ document.addEventListener("DOMContentLoaded", () => {
         if (imgFolderItem) imgFolderItem.classList.add("hidden");
       }
 
+      prepareCleanupUI();
       setStepActive(stepSuccess, panelSuccess);
     } catch (err) {
       alert(`Finalize failed: ${err.message}`);
@@ -923,24 +1069,22 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   // Reset Pipeline back to config screen
-  btnResetPipeline.addEventListener("click", () => {
-    appState.selectedDate = "";
-    statWrapper.classList.add("hidden");
-    renderEmptyIllustrations();
-    setStepActive(stepConfig, panelConfig);
-    loadStatus();
-  });
+  btnResetPipeline.addEventListener("click", resetToConfig);
 
-  // Open System Explorer
-  const openSystemExplorer = async () => {
+  // Open a project folder in System Explorer (output | input | archive)
+  const openSystemExplorer = async (target = "output") => {
     try {
-      await fetch("/api/open-explorer", { method: "POST" });
+      await fetch("/api/open-explorer", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ target })
+      });
     } catch (err) {
       console.error("Explorer command error:", err);
     }
   };
-  btnExplorerFinal.addEventListener("click", openSystemExplorer);
-  btnExplorerHeader.addEventListener("click", openSystemExplorer);
+  btnExplorerFinal.addEventListener("click", () => openSystemExplorer("output"));
+  btnExplorerHeader.addEventListener("click", () => openSystemExplorer("output"));
 
   // --- Helper: UI step visual navigation controller ---
   function setStepActive(stepIndicator, targetPanel) {
@@ -968,6 +1112,145 @@ document.addEventListener("DOMContentLoaded", () => {
       panel.classList.remove("active");
     });
     targetPanel.classList.add("active");
+  }
+
+  // --- Stage 4: screenshot cleanup (archive default / delete to Recycle Bin) ---
+  function prepareCleanupUI() {
+    const date = appState.selectedDate;
+    const count = (appState.groups[date] || []).length;
+    if (cleanupDateEl) cleanupDateEl.textContent = date;
+    if (cleanupCountEl) cleanupCountEl.textContent = count;
+    if (cleanupActions) cleanupActions.classList.remove("hidden");
+    if (cleanupProgress) cleanupProgress.classList.add("hidden");
+    if (cleanupDone) cleanupDone.classList.add("hidden");
+    if (btnArchiveFinish) btnArchiveFinish.disabled = false;
+    if (btnDeleteRecycle) btnDeleteRecycle.disabled = false;
+  }
+
+  function setupCleanup() {
+    if (btnArchiveFinish) {
+      btnArchiveFinish.addEventListener("click", () => runCleanup("archive"));
+    }
+    if (btnDeleteRecycle) {
+      btnDeleteRecycle.addEventListener("click", () => {
+        const date = appState.selectedDate;
+        const count = (appState.groups[date] || []).length;
+        if (confirm(`Send ${count} screenshots from ${date} to the Recycle Bin?\n\nThey stay recoverable in the bin, but won't be archived.`)) {
+          runCleanup("delete");
+        }
+      });
+    }
+    if (btnSkipCleanup) {
+      // Leave screenshots in place; go back to config for the next batch
+      btnSkipCleanup.addEventListener("click", resetToConfig);
+    }
+  }
+
+  function runCleanup(mode) {
+    const date = appState.selectedDate;
+    if (!date) return;
+
+    // Swap the action buttons out for the live heartbeat
+    if (cleanupActions) cleanupActions.classList.add("hidden");
+    if (cleanupDone) cleanupDone.classList.add("hidden");
+    if (cleanupProgress) cleanupProgress.classList.remove("hidden");
+    if (cleanupProgressBar) cleanupProgressBar.style.width = "0%";
+    if (cleanupProgressLabel) cleanupProgressLabel.textContent = mode === "delete" ? "Sending to Recycle Bin…" : "Archiving screenshots…";
+    if (cleanupProgressCount) cleanupProgressCount.textContent = "";
+
+    if (archiveSse) { archiveSse.close(); archiveSse = null; }
+    archiveSse = new EventSource(`/api/archive-stream?date=${encodeURIComponent(date)}&mode=${mode}`);
+
+    archiveSse.addEventListener("message", (e) => {
+      const data = JSON.parse(e.data);
+      if (data.type === "progress") {
+        if (data.value !== undefined && cleanupProgressBar) cleanupProgressBar.style.width = `${data.value}%`;
+        if (cleanupProgressLabel) cleanupProgressLabel.textContent = data.message;
+        if (cleanupProgressCount && data.total !== undefined) cleanupProgressCount.textContent = `${data.processed} / ${data.total}`;
+      } else if (data.type === "complete") {
+        archiveSse.close(); archiveSse = null;
+        if (cleanupProgress) cleanupProgress.classList.add("hidden");
+        if (cleanupDone) {
+          cleanupDone.classList.remove("hidden");
+          cleanupDone.classList.toggle("is-delete", mode === "delete");
+          const verb = mode === "delete" ? "Sent to Recycle Bin:" : "Archived";
+          const dest = mode === "delete" ? "" : ` → <code>archive/${date}/</code>`;
+          cleanupDone.innerHTML = `✓ ${verb} ${data.count} screenshots${dest}. This batch moved to the recently-archived list below on the home screen.`;
+        }
+        // Refresh in the background so the active list drops this batch
+        loadStatus();
+      } else if (data.type === "error") {
+        archiveSse.close(); archiveSse = null;
+        if (cleanupProgress) cleanupProgress.classList.add("hidden");
+        if (cleanupActions) cleanupActions.classList.remove("hidden");
+        alert(`Cleanup failed: ${data.message}`);
+      }
+    });
+
+    archiveSse.onerror = () => {
+      if (archiveSse) { archiveSse.close(); archiveSse = null; }
+      if (cleanupProgress) cleanupProgress.classList.add("hidden");
+      if (cleanupActions) cleanupActions.classList.remove("hidden");
+    };
+  }
+
+  // Reset back to the config step for the next batch
+  function resetToConfig() {
+    appState.selectedDate = "";
+    statWrapper.classList.add("hidden");
+    renderEmptyIllustrations();
+    setStepActive(stepConfig, panelConfig);
+    loadStatus();
+  }
+
+  // Ambient twinkling starfield (subtle & decorative; CSS freezes it under reduced-motion)
+  function generateStarfield() {
+    const field = document.getElementById("starfield");
+    if (!field) return;
+
+    // Soft red / green / blue tints — a star favors one while fading, goes white at peak
+    const TINTS = ["hsl(0, 85%, 66%)", "hsl(140, 70%, 60%)", "hsl(215, 90%, 66%)"];
+    const pick = (arr) => arr[(Math.random() * arr.length) | 0];
+
+    // Move to a fresh spot + re-roll the tint each time the star blinks back into existence
+    const placeStar = (star) => {
+      star.style.left = `${(Math.random() * 100).toFixed(2)}%`;
+      star.style.top = `${(Math.random() * 100).toFixed(2)}%`;
+      star.style.setProperty("--tint", pick(TINTS));
+    };
+
+    const STAR_COUNT = 110;
+    const frag = document.createDocumentFragment();
+    for (let i = 0; i < STAR_COUNT; i++) {
+      const star = document.createElement("div");
+
+      // Type mix: ~15% tiny 5-point, ~25% single-pixel, rest round
+      const r = Math.random();
+      let type = "round";
+      if (r < 0.15) type = "point";
+      else if (r < 0.40) type = "pixel";
+      star.className = type === "round" ? "star" : `star ${type}`;
+
+      let size;
+      if (type === "point") size = Math.random() * 5 + 4;      // 4–9px (needs room for the points)
+      else if (type === "pixel") size = 1;                     // exactly 1px
+      else size = Math.random() * 2.4 + 1;                     // 1–3.4px
+
+      star.style.width = `${size.toFixed(2)}px`;
+      star.style.height = `${size.toFixed(2)}px`;
+      star.style.setProperty("--glow", `${(size * 1.8).toFixed(1)}px`);
+      star.style.setProperty("--max-op", (Math.random() * 0.25 + 0.72).toFixed(2)); // 0.72–0.97
+      star.style.setProperty("--min-scale", (Math.random() * 0.2 + 0.2).toFixed(2)); // 0.2–0.4
+      star.style.setProperty("--max-scale", (Math.random() * 0.5 + 1.0).toFixed(2)); // 1.0–1.5
+      star.style.setProperty("--dur", `${(Math.random() * 4 + 2.5).toFixed(1)}s`);   // 2.5–6.5s
+      star.style.setProperty("--delay", `${(Math.random() * 7).toFixed(1)}s`);
+
+      placeStar(star);
+      // Each cycle ends invisible (opacity 0) — relocate + recolor there for a seamless "new star"
+      star.addEventListener("animationiteration", () => placeStar(star));
+      frag.appendChild(star);
+    }
+    field.appendChild(frag);
   }
 
   function setupEventListeners() {

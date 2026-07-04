@@ -9,9 +9,13 @@
 </head>
 <body>
 
-  <!-- Background Gradients -->
-  <div class="bg-gradient bg-grad-1"></div>
-  <div class="bg-gradient bg-grad-2"></div>
+  <!-- Ambient nebula + twinkling starfield (very subtle, decorative only) -->
+  <div class="cosmos" aria-hidden="true">
+    <div class="bg-gradient bg-grad-1"></div>
+    <div class="bg-gradient bg-grad-2"></div>
+    <div class="bg-gradient bg-grad-3"></div>
+    <div class="starfield" id="starfield"></div>
+  </div>
 
   <div class="app-container">
     
@@ -66,17 +70,19 @@
       <section id="panel-config" class="panel active">
         <div class="grid-2col">
           
-          <!-- Left Column: Settings & Files Import -->
+          <!-- Left Column: Daily Batches + Settings -->
           <div class="card glass-card scroll-container">
             <h2 class="section-title">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="title-icon">
-                <circle cx="12" cy="12" r="3"></circle>
-                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+                <rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect>
+                <line x1="16" y1="2" x2="16" y2="6"></line>
+                <line x1="8" y1="2" x2="8" y2="6"></line>
+                <line x1="3" y1="10" x2="21" y2="10"></line>
               </svg>
-              Settings & Import
+              Daily Batches
             </h2>
 
-            <!-- Background OCR Progress Card -->
+            <!-- Background OCR Progress Card (live heartbeat) -->
             <div id="ocr-progress-card" class="ocr-progress-card hidden">
               <div class="ocr-card-header">
                 <div class="ocr-status-group">
@@ -91,53 +97,26 @@
               <p id="ocr-hint" class="ocr-hint">Scanning and indexing files for transcription</p>
             </div>
 
-            <form id="form-settings" class="settings-form">
-              <div class="form-group">
-                <label for="input-book-title">Current Book Title</label>
-                <input type="text" id="input-book-title" placeholder="e.g. Liber Null & Psychonaut" autocomplete="off">
-                <small class="form-help">Automatically pre-filled on illustrations context prompts.</small>
-              </div>
-
-              <div class="form-group">
-                <label for="input-api-key">Gemini API Key</label>
-                <div class="password-input-wrapper">
-                  <input type="password" id="input-api-key" placeholder="Enter new API key to overwrite...">
-                  <button type="button" id="btn-toggle-key" class="btn btn-secondary btn-small">Show</button>
-                </div>
-                <small id="key-status-text" class="form-help text-muted">Key is configured inside your project.</small>
-              </div>
-
-              <button type="submit" id="btn-save-settings" class="btn btn-secondary btn-full">
-                Save & Update Settings
-              </button>
-            </form>
-
-            <hr class="card-divider">
-
-            <h3 class="subsection-title">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="title-icon">
-                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-                <polyline points="17 8 12 3 7 8"></polyline>
-                <line x1="12" y1="3" x2="12" y2="15"></line>
-              </svg>
-              Screenshots Manager
-            </h3>
-
-            <!-- Load Screenshots Drag Area -->
-            <div class="upload-dropzone" id="upload-dropzone">
+            <!-- Slim input-folder status bar (you drop screenshots in via ctrl+X) -->
+            <div class="input-folder-bar" id="input-folder-bar" title="Screenshots load automatically from the input folder. You can also drop images here.">
               <input type="file" id="input-file-picker" multiple accept="image/*" class="hidden">
-              <svg class="dropzone-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
-                <circle cx="8.5" cy="8.5" r="1.5"></circle>
-                <polyline points="21 15 16 10 5 21"></polyline>
+              <svg class="ifb-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
               </svg>
-              <div class="dropzone-text">
-                <span class="highlight">Load Screenshots</span>
-                <p>Click here to multiselect screenshot images from your Downloads or phone folder</p>
+              <span class="ifb-text"><b id="ifb-count">0</b> screenshots in input folder</span>
+              <div class="ifb-actions">
+                <button type="button" id="btn-refresh-batches" class="btn btn-secondary btn-small ifb-btn" title="Rescan the input folder">
+                  <svg class="ifb-refresh-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <polyline points="23 4 23 10 17 10"></polyline>
+                    <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
+                  </svg>
+                  Refresh
+                </button>
+                <button type="button" id="btn-open-input" class="btn btn-secondary btn-small" title="Open the input screenshots folder">Open folder</button>
               </div>
             </div>
 
-            <!-- Upload progress visual -->
+            <!-- Upload progress visual (drag-drop fallback) -->
             <div id="upload-progress-container" class="upload-progress-wrapper hidden">
               <div class="upload-progress-header">
                 <span id="upload-progress-label">Uploading...</span>
@@ -148,7 +127,7 @@
               </div>
             </div>
 
-            <!-- Batch list selector -->
+            <!-- Active batch list selector -->
             <div class="form-group select-date-group">
               <label>Select Date Batch to Process</label>
               <div id="batch-list-container" class="batch-list-container">
@@ -165,7 +144,7 @@
               </svg>
               <span>Some screenshots in this batch are still being analyzed. Please wait...</span>
             </div>
-            
+
             <div id="stat-cards-wrapper" class="stat-grid hidden">
               <div class="stat-card">
                 <span class="stat-num" id="stat-total-screens">0</span>
@@ -180,6 +159,54 @@
                 <span class="stat-label">Illustrations</span>
               </div>
             </div>
+
+            <!-- Recently archived / done batches (sanity check strip) -->
+            <div id="archived-section" class="archived-section hidden">
+              <div class="archived-header">
+                <span class="archived-title">Recently archived</span>
+                <button type="button" id="btn-show-full-archive" class="archived-flag-btn hidden" title="Show the full archive">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"></path>
+                    <line x1="4" y1="22" x2="4" y2="15"></line>
+                  </svg>
+                  <span id="archive-flag-label">Show full archive</span>
+                </button>
+              </div>
+              <div id="archived-recent" class="archived-list"></div>
+              <div id="archived-rest" class="archived-list hidden"></div>
+            </div>
+
+            <hr class="card-divider">
+
+            <!-- Book & API settings (kept below the batches you act on daily) -->
+            <form id="form-settings" class="settings-form">
+              <h3 class="subsection-title">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="title-icon">
+                  <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path>
+                  <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path>
+                </svg>
+                Book &amp; Settings
+              </h3>
+              <div class="form-group">
+                <label for="input-book-title">Current Book Title</label>
+                <input type="text" id="input-book-title" placeholder="e.g. Liber Null & Psychonaut" autocomplete="off">
+                <div id="recent-books" class="recent-books hidden"></div>
+                <small class="form-help">Automatically pre-filled on illustrations context prompts.</small>
+              </div>
+
+              <div class="form-group">
+                <label for="input-api-key">Gemini API Key</label>
+                <div class="password-input-wrapper">
+                  <input type="password" id="input-api-key" placeholder="Enter new API key to overwrite...">
+                  <button type="button" id="btn-toggle-key" class="btn btn-secondary btn-small">Show</button>
+                </div>
+                <small id="key-status-text" class="form-help text-muted">Key is configured inside your project.</small>
+              </div>
+
+              <button type="submit" id="btn-save-settings" class="btn btn-secondary btn-full">
+                Save &amp; Update Settings
+              </button>
+            </form>
           </div>
 
           <!-- Right Column: Illustration Metadata Injector -->
@@ -302,6 +329,55 @@
               <div class="stat-item" id="success-img-folder-item">
                 <span class="label">Cropped Images Subdir:</span>
                 <span class="value" id="success-output-img-folder">2026-05-29 Extracted Images/</span>
+              </div>
+            </div>
+
+            <!-- Screenshot cleanup: archive (default) or send to Recycle Bin -->
+            <div class="cleanup-section" id="cleanup-section">
+              <div class="cleanup-heading">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <polyline points="21 8 21 21 3 21 3 8"></polyline>
+                  <rect x="1" y="3" width="22" height="5"></rect>
+                  <line x1="10" y1="12" x2="14" y2="12"></line>
+                </svg>
+                <span>Screenshot cleanup</span>
+              </div>
+              <p class="cleanup-desc" id="cleanup-desc">
+                Move this day's <b><span id="cleanup-count">0</span> raw screenshots</b> into
+                <code>archive/<span id="cleanup-date"></span>/</code> for safekeeping, or send them to the Recycle Bin.
+              </p>
+
+              <!-- Live heartbeat while cleanup runs -->
+              <div class="cleanup-progress hidden" id="cleanup-progress">
+                <div class="cleanup-progress-row">
+                  <span id="cleanup-progress-label">Working…</span>
+                  <span id="cleanup-progress-count"></span>
+                </div>
+                <div class="progress-bar-bg">
+                  <div class="progress-bar-fill progress-bar-animated" id="cleanup-progress-bar" style="width: 0%;"></div>
+                </div>
+              </div>
+
+              <!-- Done confirmation -->
+              <div class="cleanup-done hidden" id="cleanup-done"></div>
+
+              <div class="cleanup-actions" id="cleanup-actions">
+                <button id="btn-archive-finish" class="btn btn-primary btn-icon-left">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <polyline points="21 8 21 21 3 21 3 8"></polyline>
+                    <rect x="1" y="3" width="22" height="5"></rect>
+                    <line x1="10" y1="12" x2="14" y2="12"></line>
+                  </svg>
+                  Archive &amp; Finish
+                </button>
+                <button id="btn-delete-recycle" class="btn btn-secondary btn-icon-left" title="Send this day's screenshots to the Windows Recycle Bin">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <polyline points="3 6 5 6 21 6"></polyline>
+                    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                  </svg>
+                  Delete to Recycle Bin
+                </button>
+                <button id="btn-skip-cleanup" class="btn btn-ghost">Skip for now</button>
               </div>
             </div>
 

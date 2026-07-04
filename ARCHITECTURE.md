@@ -31,8 +31,10 @@ Both modes share the same core processing logic. The GUI server re-implements th
 │
 ├── screenshots/            Input: raw phone screenshots (Screenshot_YYYYMMDD_HHMMSS_*.jpg/.png)
 ├── output/                 Output: YYYY-MM-DD.md daily notes + YYYY-MM-DD Extracted Images/ subdirs
+├── archive/                Archived raw screenshots after finalize: archive/YYYY-MM-DD/*.jpg (git-ignored)
 ├── .ocr_cache/             Auto-managed JSON cache: {text, isTextPage, mtime} per screenshot filename
-├── meta.json               Auto-managed GUI persistence: {bookTitle, imageContexts}
+├── .pipeline_cache/        Per-date pipeline state: {draftContent, illustrations, status} (git-ignored)
+├── meta.json               Auto-managed GUI persistence: {bookTitle, recentBooks[], imageContexts}
 ├── .env                    Secret: GEMINI_API_KEY (git-ignored, can be overwritten via GUI)
 └── eng.traineddata         Bundled Tesseract English language model (required by tesseract.js)
 ```
@@ -84,8 +86,15 @@ User reviews illustration names, edits in text areas
         ├── Writes output/YYYY-MM-DD.md (appends if file already exists)
         └── 100ms delay between each crop write for sequential Windows timestamps
 
+Step 4 (Complete): user chooses screenshot cleanup
+  └── GET /api/archive-stream?date=YYYY-MM-DD&mode=archive|delete (SSE, live heartbeat)
+        ├── archive → fs.rename each raw screenshot into archive/YYYY-MM-DD/
+        ├── delete → PowerShell (Microsoft.VisualBasic) sends them to the Recycle Bin
+        └── markBatchArchived() stamps .pipeline_cache/<date>.json status="archived"
+        → the batch leaves the active list and appears in the "recently archived" strip
+
 User clicks "Show in System Explorer"
-  └── POST /api/open-explorer → exec('explorer.exe "output/"')
+  └── POST /api/open-explorer {target} → exec('explorer.exe "<output|input|archive>"')
 ```
 
 ---
@@ -116,15 +125,17 @@ Contains the same algorithms (fuzzRatio, findOverlapFuzzy, checkHeaderColors, ge
 
 | Method | Route | Purpose |
 |---|---|---|
-| `GET` | `/api/status` | Full system scan: files, dates, OCR classification, saved settings |
-| `GET` | `/api/screenshot/:name` | Serve raw screenshot from `screenshots/` |
+| `GET` | `/api/status` | Full system scan: files, dates, OCR classification, saved settings, `recentBooks[]`, and `archivedInfo[]` (cleared batches) |
+| `GET` | `/api/screenshot/:name` | Serve raw screenshot from `screenshots/`, falling back to `archive/<date>/` for cleared batches |
 | `GET` | `/api/cropped/:date/:name` | Serve cropped image from `output/YYYY-MM-DD Extracted Images/` |
-| `POST` | `/api/settings` | Save `bookTitle` to `meta.json`, optionally overwrite `.env` with new API key |
+| `GET` | `/api/load-cache` | Return the saved `.pipeline_cache/<date>.json` for resuming/redoing a batch |
+| `POST` | `/api/settings` | Save `bookTitle` to `meta.json` (maintaining the 3-slot `recentBooks` queue), optionally overwrite `.env` with new API key |
 | `POST` | `/api/save-contexts` | Merge illustration hint text into `meta.json imageContexts` |
 | `POST` | `/api/upload` | Receive base64 image, write to `screenshots/`, run background OCR cache |
 | `GET` | `/api/process-stream` | SSE stream: full OCR → naming → dedup → Gemini text pipeline for a date |
 | `POST` | `/api/finalize` | Crop illustrations, replace placeholders, write MD and image files |
-| `POST` | `/api/open-explorer` | Run `explorer.exe` pointing to `output/` |
+| `GET` | `/api/archive-stream` | SSE stream: after finalize, move a date's raw screenshots to `archive/<date>/` (`mode=archive`) or send them to the Recycle Bin (`mode=delete`); stamps the pipeline cache `status: "archived"` |
+| `POST` | `/api/open-explorer` | Run `explorer.exe` pointing to `output/`, `input` (screenshots), or `archive` per `{target}` |
 
 **Port:** `3301` (avoids conflict with common dev servers on 3000)
 
@@ -136,12 +147,22 @@ Single `DOMContentLoaded` closure, no framework. Key state:
 
 ```js
 appState = {
-  bookTitle, apiKeyPresent, dates, groups,  // From /api/status
+  bookTitle, recentBooks, apiKeyPresent,    // From /api/status
+  dates, datesInfo, archivedInfo, groups,   // Active batches + cleared batches + per-file items
+  totalScreenshots,                         // Count shown in the slim input-folder bar
   selectedDate,                             // User's selected batch
   draftContent,                             // Formatted MD text from Gemini (Step 2 output)
   illustrations                             // [{originalFile, suggestedName, time}] for review grid
 }
 ```
+
+**Batch statuses** (`datesInfo[].status`) drive the color-coded cards on Step 1:
+`ocr_active` (Analyzing — cyan pulse) → `ocr_done` (Ready — green/go) → `paused`
+(Resume Draft — amber) → `completed` (Finalized — violet). Once a finalized batch's
+screenshots are archived/deleted it leaves `datesInfo` and reappears in `archivedInfo`
+(the collapsed "recently archived" strip). The 3 most-recent archived batches show by
+default; the flag button expands the rest. `recentBooks` renders as quick-switch chips
+under the book-title field so concurrently-read books swap in one click.
 
 **Step transitions** are managed by `setStepActive(stepIndicator, targetPanel)`, which toggles `.active` / `.completed` CSS classes.
 
@@ -173,6 +194,15 @@ All colors are defined as CSS variables at the `:root` level. Theme: **Esoteric 
 | `--accent-green` | `hsl(150, 80%, 40%)` | Terminal success log text |
 
 To update the theme, change only the `:root` variables — all component styles inherit them.
+
+**Ambient cosmos:** a fixed, `z-index: -1` `.cosmos` layer holds three slowly-drifting
+blurred nebula blobs (`.bg-grad-1/2/3`) plus a `.starfield` of 60 JS-generated `.star`
+dots that twinkle via CSS custom properties (`--min-op/--max-op/--dur/--delay`). It stays
+purely decorative (`pointer-events: none`) and freezes under `prefers-reduced-motion`.
+
+**Status palette classes** (Step 1 batch cards): `.batch-status-ocr_active` (cyan, pulsing),
+`.batch-status-ocr_done` (green — Ready/go), `.batch-status-paused` (amber),
+`.batch-status-completed` (violet — Finalized), `.batch-status-archived` (slate).
 
 ---
 

@@ -3,6 +3,7 @@ node_modules/
 output/
 screenshots/
 .ocr_cache/
+archive/
 
 # Files to ignore
 .env

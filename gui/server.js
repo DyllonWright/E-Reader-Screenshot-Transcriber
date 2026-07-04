@@ -2,7 +2,7 @@
 const express = require("express");
 const fs = require("fs");
 const path = require("path");
-const { exec } = require("child_process");
+const { exec, execFile } = require("child_process");
 const os = require("os");
 const Tesseract = require("tesseract.js");
 const { Jimp } = require("jimp");
@@ -12,7 +12,7 @@ const { GoogleGenerativeAI } = require("@google/generative-ai");
 require("dotenv").config({ path: path.join(__dirname, "..", ".env") });
 
 const app = express();
-const PORT = 3301;
+const PORT = process.env.PORT || 3301;
 
 // Enable large JSON payloads for base64 uploads
 app.use(express.json({ limit: "50mb" }));
@@ -28,12 +28,64 @@ const outputDir      = path.join(projectRoot, "output");
 const ocrCacheDir    = path.join(projectRoot, ".ocr_cache");
 const metaFilePath   = path.join(projectRoot, "meta.json");
 const pipelineCacheDir = path.join(projectRoot, ".pipeline_cache");
+const archiveDir     = path.join(projectRoot, "archive");
 
 // Ensure baseline directories exist
 if (!fs.existsSync(screenshotsDir)) fs.mkdirSync(screenshotsDir, { recursive: true });
 if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
 if (!fs.existsSync(ocrCacheDir)) fs.mkdirSync(ocrCacheDir, { recursive: true });
 if (!fs.existsSync(pipelineCacheDir)) fs.mkdirSync(pipelineCacheDir, { recursive: true });
+if (!fs.existsSync(archiveDir)) fs.mkdirSync(archiveDir, { recursive: true });
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Locate a screenshot by filename, falling back to the archive/<date>/ folders
+// so finalized batches whose raw shots were archived can still preview/re-crop.
+function findScreenshotPath(name, date = null) {
+  const primary = path.join(screenshotsDir, name);
+  if (fs.existsSync(primary)) return primary;
+  if (date) {
+    const dated = path.join(archiveDir, date, name);
+    if (fs.existsSync(dated)) return dated;
+  }
+  if (fs.existsSync(archiveDir)) {
+    for (const sub of fs.readdirSync(archiveDir)) {
+      const candidate = path.join(archiveDir, sub, name);
+      if (fs.existsSync(candidate)) return candidate;
+    }
+  }
+  return null;
+}
+
+// Send a list of files to the Windows Recycle Bin (recoverable, not permanent).
+// One PowerShell invocation handles the whole batch; paths are single-quote escaped.
+function recycleFilesToBin(filePaths) {
+  return new Promise((resolve, reject) => {
+    if (!filePaths || filePaths.length === 0) return resolve();
+    const psArray = filePaths.map((p) => `'${p.replace(/'/g, "''")}'`).join(",");
+    const script = `Add-Type -AssemblyName Microsoft.VisualBasic; foreach ($f in @(${psArray})) { if (Test-Path -LiteralPath $f) { [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile($f,'OnlyErrorDialogs','SendToRecycleBin') } }`;
+    execFile("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script], (err, stdout, stderr) => {
+      if (err) return reject(new Error(stderr || err.message));
+      resolve();
+    });
+  });
+}
+
+// Stamp a batch's pipeline cache as archived so /api/status can surface it in the
+// "recently archived" strip even though its screenshots have left the input folder.
+function markBatchArchived(date, mode, fileCount) {
+  const cachePath = path.join(pipelineCacheDir, `${date}.json`);
+  let data = {};
+  if (fs.existsSync(cachePath)) {
+    try { data = JSON.parse(fs.readFileSync(cachePath, "utf8")); } catch (e) { data = {}; }
+  }
+  data.date = date;
+  data.status = "archived";
+  data.archiveMode = mode;
+  data.archivedAt = new Date().toISOString();
+  data.fileCount = fileCount;
+  fs.writeFileSync(cachePath, JSON.stringify(data, null, 2), "utf8");
+}
 
 // --- Persistent State Helpers ---
 function readMeta() {
@@ -44,7 +96,7 @@ function readMeta() {
       console.error("Error reading meta.json, resetting:", err);
     }
   }
-  return { bookTitle: "", imageContexts: {} };
+  return { bookTitle: "", imageContexts: {}, recentBooks: [] };
 }
 
 function writeMeta(data) {
@@ -494,10 +546,10 @@ function findOverlapFuzzy(previousText, newText, anchorWordCount = 12, threshold
 
 // --- Endpoints ---
 
-// Serve raw screenshots
+// Serve raw screenshots (checks the input folder first, then archived batches)
 app.get("/api/screenshot/:name", (req, res) => {
-  const filePath = path.join(screenshotsDir, req.params.name);
-  if (fs.existsSync(filePath)) {
+  const filePath = findScreenshotPath(req.params.name, req.query.date || null);
+  if (filePath) {
     res.sendFile(filePath);
   } else {
     res.status(404).send("File not found");
@@ -581,7 +633,9 @@ app.get("/api/status", async (req, res) => {
 
       resultGroups[date] = items;
 
-      // Determine batch status: completed (green), paused (yellow), ocr_done (red), ocr_active (black)
+      // Determine batch status. Palette (UI): ocr_active = Analyzing (cyan pulse),
+      // ocr_done = Ready (green/go), paused = Resume Draft (amber), completed = Finalized
+      // (violet). Archived batches have no live screenshots and surface via archivedInfo.
       let status = "ocr_active";
       if (ocrCachedCount === totalFiles) {
         const cacheFilePath = path.join(pipelineCacheDir, `${date}.json`);
@@ -590,7 +644,11 @@ app.get("/api/status", async (req, res) => {
         if (fs.existsSync(cacheFilePath)) {
           try {
             const cacheData = JSON.parse(fs.readFileSync(cacheFilePath, "utf8"));
-            if (cacheData.status === "completed" && fs.existsSync(finalMdPath)) {
+            if (cacheData.status === "archived") {
+              // Batch was archived/cleared previously, yet fresh screenshots exist for
+              // this date again — treat it as a new, ready-to-process batch.
+              status = "ocr_done";
+            } else if (cacheData.status === "completed" && fs.existsSync(finalMdPath)) {
               status = "completed";
             } else if (cacheData.draftContent) {
               status = "paused";
@@ -620,14 +678,43 @@ app.get("/api/status", async (req, res) => {
       });
     }
 
+    // Build the archived-batches list from pipeline caches whose screenshots have
+    // already been cleared. Dates with live screenshots are excluded (active wins).
+    const activeDatesSet = new Set(dates);
+    const archivedInfo = [];
+    if (fs.existsSync(pipelineCacheDir)) {
+      for (const f of fs.readdirSync(pipelineCacheDir)) {
+        if (!f.endsWith(".json")) continue;
+        const d = f.replace(/\.json$/, "");
+        if (activeDatesSet.has(d)) continue;
+        try {
+          const c = JSON.parse(fs.readFileSync(path.join(pipelineCacheDir, f), "utf8"));
+          if (c.status === "archived") {
+            archivedInfo.push({
+              date: d,
+              fileCount: c.fileCount || 0,
+              mode: c.archiveMode || "archive",
+              archivedAt: c.archivedAt || null,
+              status: "archived"
+            });
+          }
+        } catch (e) {
+          // Skip unreadable cache
+        }
+      }
+      archivedInfo.sort((a, b) => b.date.localeCompare(a.date));
+    }
+
     const apiKey = process.env.GEMINI_API_KEY || "";
     res.json({
       success: true,
       bookTitle: meta.bookTitle || "",
+      recentBooks: Array.isArray(meta.recentBooks) ? meta.recentBooks : [],
       apiKeyPresent: apiKey.length > 0,
       apiKeyMasked: apiKey.length > 0 ? `${apiKey.slice(0, 6)}...${apiKey.slice(-4)}` : "",
       dates,
       datesInfo,
+      archivedInfo,
       groups: resultGroups,
       ocrActive: isOcrRunning || totalUncached > 0,
       ocrTotal: isOcrRunning ? ocrTotal : totalUncached,
@@ -665,7 +752,17 @@ app.post("/api/settings", (req, res) => {
   
   try {
     const meta = readMeta();
-    meta.bookTitle = bookTitle || "";
+    const newTitle = (bookTitle || "").trim();
+    meta.bookTitle = newTitle;
+
+    // Maintain a de-duplicated queue of the 3 most recently used book titles so the
+    // user can hop between concurrently-read books with one click.
+    if (newTitle) {
+      const recent = Array.isArray(meta.recentBooks) ? meta.recentBooks : [];
+      const filtered = recent.filter((b) => b && b.toLowerCase() !== newTitle.toLowerCase());
+      filtered.unshift(newTitle);
+      meta.recentBooks = filtered.slice(0, 3);
+    }
     writeMeta(meta);
 
     if (apiKey && apiKey.trim().length > 0) {
@@ -1066,7 +1163,8 @@ app.post("/api/finalize", async (req, res) => {
 
     for (let i = 0; i < illustrations.length; i++) {
       const item = illustrations[i];
-      const srcPath = path.join(screenshotsDir, item.originalFile);
+      // Resolve from the input folder, or the archive if this batch was already cleared.
+      const srcPath = findScreenshotPath(item.originalFile, date) || path.join(screenshotsDir, item.originalFile);
       const outPath = path.join(testOutputDir, item.finalizedName);
 
       // Perform Cropping using Jimp
@@ -1177,14 +1275,116 @@ app.post("/api/finalize", async (req, res) => {
   }
 });
 
-// Open Output Folder in Windows File Explorer
+// Open a project folder in Windows File Explorer (output | input | archive)
 app.post("/api/open-explorer", (req, res) => {
   try {
-    console.log(`[System Command] Opening folder in explorer: ${outputDir}`);
-    exec(`explorer.exe "${outputDir}"`);
+    const targets = { output: outputDir, input: screenshotsDir, archive: archiveDir };
+    const target = targets[req.body && req.body.target] || outputDir;
+    if (!fs.existsSync(target)) fs.mkdirSync(target, { recursive: true });
+    console.log(`[System Command] Opening folder in explorer: ${target}`);
+    exec(`explorer.exe "${target}"`);
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// SSE endpoint: archive (move to archive/<date>/) or delete (Recycle Bin) a batch's
+// raw screenshots once it has been finalized, streaming a live heartbeat of progress.
+app.get("/api/archive-stream", async (req, res) => {
+  const date = req.query.date;
+  const mode = req.query.mode === "delete" ? "delete" : "archive";
+
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+
+  const sendEvent = (type, message, extra = {}) => {
+    res.write(`data: ${JSON.stringify({ type, message, ...extra })}\n\n`);
+  };
+
+  try {
+    if (!date) {
+      sendEvent("error", "Missing date parameter.");
+      return res.end();
+    }
+
+    const allFiles = fs.existsSync(screenshotsDir)
+      ? fs.readdirSync(screenshotsDir).filter((f) => /\.(jpe?g|png)$/i.test(f))
+      : [];
+    const dayFiles = allFiles
+      .filter((f) => {
+        const dt = parseDateTimeFromFilename(f);
+        return dt && dt.date === date;
+      })
+      .sort((a, b) => a.localeCompare(b));
+
+    const verb = mode === "delete" ? "Deleting" : "Archiving";
+
+    if (dayFiles.length === 0) {
+      // Nothing left in the input folder — treat as already cleared and just stamp it.
+      sendEvent("log", `No raw screenshots found in the input folder for ${date} (already cleared).`);
+      markBatchArchived(date, mode, 0);
+      sendEvent("complete", "Batch already cleared.", { date, mode, count: 0 });
+      return res.end();
+    }
+
+    sendEvent("log", `${verb} ${dayFiles.length} raw screenshots for ${date}...`);
+
+    let processed = 0;
+
+    if (mode === "archive") {
+      const destDir = path.join(archiveDir, date);
+      if (!fs.existsSync(destDir)) fs.mkdirSync(destDir, { recursive: true });
+
+      for (const f of dayFiles) {
+        const src = path.join(screenshotsDir, f);
+        const dest = path.join(destDir, f);
+        try {
+          fs.renameSync(src, dest);
+        } catch (e) {
+          // Cross-device or locked file — fall back to copy + unlink.
+          try {
+            fs.copyFileSync(src, dest);
+            fs.unlinkSync(src);
+          } catch (e2) {
+            sendEvent("log", `  ⚠️ Could not move ${f}: ${e2.message}`);
+          }
+        }
+        processed++;
+        sendEvent("progress", `Archiving ${processed}/${dayFiles.length}`, {
+          value: Math.round((processed / dayFiles.length) * 100),
+          processed,
+          total: dayFiles.length
+        });
+        await sleep(60); // brief pause keeps the heartbeat visible
+      }
+      sendEvent("log", `Moved ${processed} screenshots into archive/${date}/`);
+    } else {
+      sendEvent("progress", `Sending ${dayFiles.length} files to the Recycle Bin...`, {
+        value: 40,
+        processed: 0,
+        total: dayFiles.length
+      });
+      const paths = dayFiles.map((f) => path.join(screenshotsDir, f));
+      await recycleFilesToBin(paths);
+      processed = dayFiles.length;
+      sendEvent("progress", `Recycled ${processed}/${dayFiles.length}`, {
+        value: 100,
+        processed,
+        total: dayFiles.length
+      });
+      sendEvent("log", `Sent ${processed} screenshots to the Recycle Bin.`);
+    }
+
+    markBatchArchived(date, mode, processed);
+    const doneVerb = mode === "delete" ? "Deleted" : "Archived";
+    sendEvent("complete", `${doneVerb} ${processed} screenshots.`, { date, mode, count: processed });
+    res.end();
+  } catch (err) {
+    console.error("Archive stream error:", err);
+    sendEvent("error", `Cleanup failed: ${err.message}`);
+    res.end();
   }
 });
 
@@ -1194,7 +1394,9 @@ app.listen(PORT, () => {
   console.log(` E-Reader Screenshot Transcriber GUI Online     `);
   console.log(` Server active on: http://localhost:${PORT}      `);
   console.log(`================================================`);
-  
-  // Trigger open browser on Windows automatically
-  exec(`start http://localhost:${PORT}`);
+
+  // Trigger open browser on Windows automatically (set NO_AUTO_OPEN=1 to skip, e.g. headless testing)
+  if (!process.env.NO_AUTO_OPEN) {
+    exec(`start http://localhost:${PORT}`);
+  }
 });
