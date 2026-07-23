@@ -29,6 +29,7 @@ const ocrCacheDir    = path.join(projectRoot, ".ocr_cache");
 const metaFilePath   = path.join(projectRoot, "meta.json");
 const pipelineCacheDir = path.join(projectRoot, ".pipeline_cache");
 const archiveDir     = path.join(projectRoot, "archive");
+const geminiStatsFilePath = path.join(projectRoot, "gemini_stats.json");
 
 // Ensure baseline directories exist
 if (!fs.existsSync(screenshotsDir)) fs.mkdirSync(screenshotsDir, { recursive: true });
@@ -91,16 +92,85 @@ function markBatchArchived(date, mode, fileCount) {
 function readMeta() {
   if (fs.existsSync(metaFilePath)) {
     try {
-      return JSON.parse(fs.readFileSync(metaFilePath, "utf8"));
+      const data = JSON.parse(fs.readFileSync(metaFilePath, "utf8"));
+      return { bookTitle: "", imageContexts: {}, recentBooks: [], dailyQuotaTarget: 50, ...data };
     } catch (err) {
       console.error("Error reading meta.json, resetting:", err);
     }
   }
-  return { bookTitle: "", imageContexts: {}, recentBooks: [] };
+  return { bookTitle: "", imageContexts: {}, recentBooks: [], dailyQuotaTarget: 50 };
 }
 
 function writeMeta(data) {
   fs.writeFileSync(metaFilePath, JSON.stringify(data, null, 2), "utf8");
+}
+
+// --- Gemini API Stats & Timing Helpers ---
+function readGeminiStats() {
+  if (fs.existsSync(geminiStatsFilePath)) {
+    try {
+      return JSON.parse(fs.readFileSync(geminiStatsFilePath, "utf8"));
+    } catch (err) {
+      console.error("Error reading gemini_stats.json, resetting:", err);
+    }
+  }
+  return { lastRun: null, dailyStats: {}, history: [] };
+}
+
+function writeGeminiStats(data) {
+  try {
+    fs.writeFileSync(geminiStatsFilePath, JSON.stringify(data, null, 2), "utf8");
+  } catch (err) {
+    console.error("Error writing gemini_stats.json:", err);
+  }
+}
+
+function recordGeminiCall(callDetail) {
+  const stats = readGeminiStats();
+  const utcDate = new Date().toISOString().split("T")[0]; // 24hr UTC window key e.g. "2026-07-22"
+  
+  if (!stats.dailyStats) stats.dailyStats = {};
+  if (!stats.dailyStats[utcDate]) {
+    stats.dailyStats[utcDate] = {
+      utcDate,
+      totalCalls: 0,
+      totalDurationMs: 0,
+      avgDurationMs: 0,
+      totalInputTokens: 0,
+      totalOutputTokens: 0,
+      totalTokens: 0,
+      models: {},
+      calls: []
+    };
+  }
+
+  const day = stats.dailyStats[utcDate];
+  day.totalCalls += 1;
+  day.totalDurationMs += callDetail.durationMs;
+  day.avgDurationMs = Math.round(day.totalDurationMs / day.totalCalls);
+  day.totalInputTokens += callDetail.inputTokens;
+  day.totalOutputTokens += callDetail.outputTokens;
+  day.totalTokens += callDetail.totalTokens;
+  
+  if (!day.models) day.models = {};
+  day.models[callDetail.model] = (day.models[callDetail.model] || 0) + 1;
+  
+  if (!day.calls) day.calls = [];
+  day.calls.unshift(callDetail);
+  if (day.calls.length > 50) day.calls.pop();
+
+  if (!stats.history) stats.history = [];
+  stats.history.unshift(callDetail);
+  if (stats.history.length > 100) stats.history.pop();
+
+  writeGeminiStats(stats);
+  return callDetail;
+}
+
+function recordLastRunStats(lastRunSummary) {
+  const stats = readGeminiStats();
+  stats.lastRun = lastRunSummary;
+  writeGeminiStats(stats);
 }
 
 function parseDateTimeFromFilename(filename) {
@@ -422,20 +492,64 @@ async function runBackgroundOcr() {
 }
 
 // --- Gemini Retries & API Config ---
-async function generateContentWithRetry(apiKey, prompt, onStatusUpdate = null, maxRetries = 5, initialDelayMs = 2000) {
+async function generateContentWithRetry(apiKey, prompt, onStatusUpdate = null, maxRetries = 5, initialDelayMs = 2000, meta = {}) {
   const genAI = new GoogleGenerativeAI(apiKey);
-  const model = genAI.getGenerativeModel({ model: "gemini-flash-latest" });
+  const modelName = "gemini-flash-latest";
+  const model = genAI.getGenerativeModel({ model: modelName });
   
   let attempt = 0;
+  const startTime = Date.now();
   if (onStatusUpdate) onStatusUpdate("Contacting Gemini API...");
   while (true) {
     try {
       const result = await model.generateContent(prompt);
-      if (onStatusUpdate) onStatusUpdate("Response received successfully.");
-      return result;
+      const durationMs = Date.now() - startTime;
+      const durationSec = parseFloat((durationMs / 1000).toFixed(2));
+      if (onStatusUpdate) onStatusUpdate(`Response received in ${durationSec}s.`);
+
+      const responseText = result.response ? result.response.text() : "";
+      const usage = (result.response && result.response.usageMetadata) || {};
+      const inputTokens = usage.promptTokenCount !== undefined ? usage.promptTokenCount : Math.ceil(prompt.length / 4);
+      const outputTokens = usage.candidatesTokenCount !== undefined ? usage.candidatesTokenCount : Math.ceil(responseText.length / 4);
+      const totalTokens = usage.totalTokenCount !== undefined ? usage.totalTokenCount : (inputTokens + outputTokens);
+
+      const callStat = {
+        type: meta.type || "general",
+        model: modelName,
+        durationMs,
+        durationSec,
+        inputTokens,
+        outputTokens,
+        totalTokens,
+        timestamp: new Date().toISOString(),
+        itemCount: meta.itemCount || 1,
+        status: "success",
+        attempts: attempt + 1
+      };
+
+      recordGeminiCall(callStat);
+
+      return { result, durationMs, callStat };
     } catch (error) {
       attempt++;
-      if (attempt >= maxRetries) throw error;
+      const durationMs = Date.now() - startTime;
+      if (attempt >= maxRetries) {
+        recordGeminiCall({
+          type: meta.type || "general",
+          model: modelName,
+          durationMs,
+          durationSec: parseFloat((durationMs / 1000).toFixed(2)),
+          inputTokens: Math.ceil(prompt.length / 4),
+          outputTokens: 0,
+          totalTokens: Math.ceil(prompt.length / 4),
+          timestamp: new Date().toISOString(),
+          itemCount: meta.itemCount || 1,
+          status: "error",
+          error: error.message,
+          attempts: attempt
+        });
+        throw error;
+      }
       const isTransient = error.status === 503 || error.status === 429 || 
                           (error.message && (error.message.includes("503") || error.message.includes("429") || error.message.includes("high demand") || error.message.includes("overloaded")));
       if (isTransient) {
@@ -706,10 +820,12 @@ app.get("/api/status", async (req, res) => {
     }
 
     const apiKey = process.env.GEMINI_API_KEY || "";
+    const statsData = readGeminiStats();
     res.json({
       success: true,
       bookTitle: meta.bookTitle || "",
       recentBooks: Array.isArray(meta.recentBooks) ? meta.recentBooks : [],
+      dailyQuotaTarget: meta.dailyQuotaTarget || 50,
       apiKeyPresent: apiKey.length > 0,
       apiKeyMasked: apiKey.length > 0 ? `${apiKey.slice(0, 6)}...${apiKey.slice(-4)}` : "",
       dates,
@@ -719,8 +835,31 @@ app.get("/api/status", async (req, res) => {
       ocrActive: isOcrRunning || totalUncached > 0,
       ocrTotal: isOcrRunning ? ocrTotal : totalUncached,
       ocrProcessed: isOcrRunning ? ocrProcessed : 0,
-      totalUncached
+      totalUncached,
+      dailyQuotaTarget: meta.dailyQuotaTarget || 50,
+      lastRunStats: statsData.lastRun || null
     });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Endpoint to fetch full Gemini API stats and 24hr UTC windows breakdown
+app.get("/api/gemini-stats", (req, res) => {
+  try {
+    const stats = readGeminiStats();
+    const meta = readMeta();
+    res.json({ success: true, stats, dailyQuotaTarget: meta.dailyQuotaTarget || 50 });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Endpoint to reset/clear Gemini stats history if desired by user in dev debug
+app.post("/api/clear-gemini-stats", (req, res) => {
+  try {
+    writeGeminiStats({ lastRun: null, dailyStats: {}, history: [] });
+    res.json({ success: true, message: "Gemini stats cleared successfully!" });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -746,22 +885,27 @@ app.get("/api/load-cache", (req, res) => {
   }
 });
 
-// Update settings: global Book Title (meta.json) and API Key (.env)
+// Update settings: global Book Title (meta.json), API Key (.env), and dailyQuotaTarget
 app.post("/api/settings", (req, res) => {
-  const { bookTitle, apiKey } = req.body;
+  const { bookTitle, apiKey, dailyQuotaTarget } = req.body;
   
   try {
     const meta = readMeta();
     const newTitle = (bookTitle || "").trim();
-    meta.bookTitle = newTitle;
-
-    // Maintain a de-duplicated queue of the 3 most recently used book titles so the
-    // user can hop between concurrently-read books with one click.
+    // Only overwrite the stored book when a non-empty title arrives. The settings
+    // form re-sends the book field on every save (e.g. when saving just an API
+    // key), so writing an empty string here would silently wipe the book — that is
+    // exactly how it got lost before. A blank field now leaves the book untouched.
     if (newTitle) {
+      meta.bookTitle = newTitle;
       const recent = Array.isArray(meta.recentBooks) ? meta.recentBooks : [];
       const filtered = recent.filter((b) => b && b.toLowerCase() !== newTitle.toLowerCase());
       filtered.unshift(newTitle);
       meta.recentBooks = filtered.slice(0, 3);
+    }
+
+    if (dailyQuotaTarget && !isNaN(Number(dailyQuotaTarget)) && Number(dailyQuotaTarget) > 0) {
+      meta.dailyQuotaTarget = Number(dailyQuotaTarget);
     }
     writeMeta(meta);
 
@@ -819,6 +963,9 @@ app.get("/api/process-stream", async (req, res) => {
     return res.status(400).send("Missing date parameter");
   }
 
+  const stage2StartTime = Date.now();
+  const processCallStats = [];
+
   // Setup Server-Sent Events headers
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
@@ -857,14 +1004,22 @@ app.get("/api/process-stream", async (req, res) => {
 
     // Step 1: Resolve OCR (should be 100% cached at this stage due to status page precaching)
     sendEvent("log", "Step 1: Reading OCR cache results...");
+    const ocrStartTime = Date.now();
+    let ocrHits = 0;
+    let ocrMisses = 0;
     const ocrItems = [];
     for (let i = 0; i < dayFiles.length; i++) {
       const item = dayFiles[i];
+      const cachePath = path.join(ocrCacheDir, `${item.file}.json`);
+      const isCachedBefore = fs.existsSync(cachePath);
       const { text, isTextPage } = await ensureOcrCached(item.file, item.path);
+      if (isCachedBefore) ocrHits++; else ocrMisses++;
       const type = isTextPage ? "text" : "image";
       ocrItems.push({ ...item, rawText: text, type });
       sendEvent("progress", `OCR read: ${i + 1}/${dayFiles.length}`, { value: Math.round(((i + 1) / dayFiles.length) * 30) });
     }
+    const ocrDurationMs = Date.now() - ocrStartTime;
+    const ocrHitRatePct = dayFiles.length > 0 ? parseFloat(((ocrHits / dayFiles.length) * 100).toFixed(1)) : 100;
 
     // Step 2: Gemini Contextual Naming mappings (Illustration placeholders)
     sendEvent("log", "Step 2: Naming illustrations via Gemini...");
@@ -945,10 +1100,12 @@ Return ONLY a JSON array of objects with this exact structure (no markdown fence
 ]`;
 
       try {
-        const result = await generateContentWithRetry(apiKey, prompt, (statusMsg) => {
+        const { result, durationMs, callStat } = await generateContentWithRetry(apiKey, prompt, (statusMsg) => {
           sendEvent("log", `  [Gemini Naming] ${statusMsg}`);
           sendEvent("progress", `Gemini Naming: ${statusMsg}`, { value: 30 });
-        });
+        }, 5, 2000, { type: "naming", itemCount: imageItems.length });
+
+        if (callStat) processCallStats.push(callStat);
         const responseText = result.response.text();
         const cleanedText = responseText.replace(/```json/g, "").replace(/```/g, "").trim();
         const suggestedList = JSON.parse(cleanedText);
@@ -1006,6 +1163,9 @@ Return ONLY a JSON array of objects with this exact structure (no markdown fence
     sendEvent("log", "Step 3: Performing fuzzy deduplication on text overlap screenshots...");
     const textOcrItems = ocrItems.filter(item => item.type === "text");
     const mergedTextItems = [];
+    let duplicatesDiscarded = 0;
+    let trimmedChars = 0;
+    const rawTextTotalChars = textOcrItems.reduce((sum, item) => sum + item.rawText.length, 0);
 
     for (const item of textOcrItems) {
       if (mergedTextItems.length === 0) {
@@ -1013,12 +1173,17 @@ Return ONLY a JSON array of objects with this exact structure (no markdown fence
         continue;
       }
       const lastItem = mergedTextItems[mergedTextItems.length - 1];
+      const originalItemLength = item.rawText.length;
       const mergeResult = findOverlapFuzzy(lastItem.rawText, item.rawText);
 
       if (mergeResult) {
         if (mergeResult.isDuplicate) {
+          duplicatesDiscarded++;
+          trimmedChars += originalItemLength;
           sendEvent("log", `  → Discarded duplicate text screenshot: ${item.file} (similarity: ${mergeResult.score || 'N/A'}%)`);
         } else {
+          const trimmedLen = mergeResult.newText.length;
+          trimmedChars += Math.max(0, originalItemLength - trimmedLen);
           sendEvent("log", `  → Trimmed text overlap from ${item.file} (similarity: ${mergeResult.score}%)`);
           if (mergeResult.trimmedPreviousText) {
             lastItem.rawText = mergeResult.trimmedPreviousText;
@@ -1030,6 +1195,11 @@ Return ONLY a JSON array of objects with this exact structure (no markdown fence
         mergedTextItems.push(item);
       }
     }
+
+    const finalDedupTextChars = mergedTextItems.reduce((sum, item) => sum + item.rawText.length, 0);
+    const dedupReductionPct = rawTextTotalChars > 0 
+      ? parseFloat((((rawTextTotalChars - finalDedupTextChars) / rawTextTotalChars) * 100).toFixed(1))
+      : 0;
 
     // Chronologically weave text and image slots
     const mergedOcrItems = [...mergedTextItems, ...ocrItems.filter(item => item.type === "image")];
@@ -1068,10 +1238,12 @@ Return ONLY the formatted text. Do not add any extra titles, commentary, or intr
 
       try {
         const batchNum = Math.floor(i / GEMINI_BATCH_SIZE) + 1;
-        const result = await generateContentWithRetry(apiKey, prompt, (statusMsg) => {
+        const { result, durationMs, callStat } = await generateContentWithRetry(apiKey, prompt, (statusMsg) => {
           sendEvent("log", `  [Gemini Batch ${batchNum}] ${statusMsg}`);
           sendEvent("progress", `Gemini Batch ${batchNum}: ${statusMsg}`, { value: 30 + Math.round((i / ocrResults.length) * 50) });
-        });
+        }, 5, 2000, { type: "transcription", itemCount: Math.min(GEMINI_BATCH_SIZE, ocrResults.length - i) });
+
+        if (callStat) processCallStats.push(callStat);
         const text = result.response.text().trim();
         formattedTextParts.push(text);
         sendEvent("progress", `Gemini batch: ${Math.floor(i / GEMINI_BATCH_SIZE) + 1} done`, { value: 30 + Math.round(((i + chunk.length) / ocrResults.length) * 50) });
@@ -1084,7 +1256,71 @@ Return ONLY the formatted text. Do not add any extra titles, commentary, or intr
     const formattedOutput = formattedTextParts.join('\n\n');
     sendEvent("log", "Process completed. Forwarding to review...");
 
-    // Send final structure containing proposed filenames, draft content, and crop coordinates
+    // Compute final Stage 2 timing & token metrics summary
+    const stage2TotalDurationMs = Date.now() - stage2StartTime;
+    const totalGeminiMs = processCallStats.reduce((sum, c) => sum + c.durationMs, 0);
+    const totalInputTokens = processCallStats.reduce((sum, c) => sum + c.inputTokens, 0);
+    const totalOutputTokens = processCallStats.reduce((sum, c) => sum + c.outputTokens, 0);
+    const totalTokens = processCallStats.reduce((sum, c) => sum + c.totalTokens, 0);
+
+    // Yield & Word Count Metrics
+    const totalWords = formattedOutput.split(/\s+/).filter(Boolean).length;
+    const wordsPerPage = textOcrItems.length > 0 ? parseFloat((totalWords / textOcrItems.length).toFixed(1)) : 0;
+    const tokensPer100Words = totalWords > 0 ? Math.round((totalTokens / totalWords) * 100) : 0;
+
+    // Daily Quota Tracking (1,500 RPD)
+    const statsHistory = readGeminiStats();
+    const utcDateToday = new Date().toISOString().split("T")[0];
+    const todayStats = (statsHistory.dailyStats && statsHistory.dailyStats[utcDateToday]) || {};
+    const callsTodayCount = (todayStats.totalCalls || 0);
+    // Single source of truth: the user-configured daily target (Dev Stats meter).
+    // Free-tier RPD for gemini-flash-latest is per-project and low since the
+    // Dec-2025 cuts, so the authoritative number lives in the AI Studio console —
+    // we track against the target the user set rather than a hardcoded 1,500.
+    const freeTierQuotaLimit = meta.dailyQuotaTarget || 50;
+    const quotaUsedPct = parseFloat(((callsTodayCount / freeTierQuotaLimit) * 100).toFixed(2));
+
+    const lastRunSummary = {
+      date,
+      timestamp: new Date().toISOString(),
+      stage2TotalDurationMs,
+      stage2TotalDurationSec: parseFloat((stage2TotalDurationMs / 1000).toFixed(2)),
+      geminiDurationMs: totalGeminiMs,
+      geminiDurationSec: parseFloat((totalGeminiMs / 1000).toFixed(2)),
+      callsCount: processCallStats.length,
+      totalInputTokens,
+      totalOutputTokens,
+      totalTokens,
+      ocrStats: {
+        totalScreenshots: dayFiles.length,
+        hits: ocrHits,
+        misses: ocrMisses,
+        hitRatePct: ocrHitRatePct,
+        durationMs: ocrDurationMs
+      },
+      dedupStats: {
+        textPagesCount: textOcrItems.length,
+        duplicatesDiscarded,
+        trimmedChars,
+        rawTextChars: rawTextTotalChars,
+        finalTextChars: finalDedupTextChars,
+        reductionPct: dedupReductionPct
+      },
+      yieldStats: {
+        totalWords,
+        wordsPerPage,
+        tokensPer100Words
+      },
+      quotaStats: {
+        callsToday: callsTodayCount,
+        quotaLimit: freeTierQuotaLimit,
+        quotaUsedPct
+      },
+      calls: processCallStats
+    };
+    recordLastRunStats(lastRunSummary);
+
+    // Send final structure containing proposed filenames, draft content, crop coordinates, and timing summary
     const illustrationsList = [];
     for (const item of ocrItems.filter(item => item.type === "image")) {
       let suggestedCrop = null;
@@ -1122,14 +1358,15 @@ Return ONLY the formatted text. Do not add any extra titles, commentary, or intr
         bookTitle: meta.bookTitle || "",
         draftContent: formattedOutput,
         illustrations: illustrationsList,
-        status: "paused"
+        status: "paused",
+        lastRunSummary
       };
       fs.writeFileSync(path.join(pipelineCacheDir, `${date}.json`), JSON.stringify(cacheData, null, 2), "utf8");
     } catch (err) {
       console.error(`Error writing pipeline cache for ${date}:`, err);
     }
 
-    sendEvent("complete", "Batch analyzed successfully!", { reviewData });
+    sendEvent("complete", "Batch analyzed successfully!", { reviewData, lastRunSummary });
     res.end();
   } catch (err) {
     console.error("SSE Error:", err);

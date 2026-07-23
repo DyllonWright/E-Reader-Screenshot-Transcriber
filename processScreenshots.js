@@ -177,16 +177,103 @@ function groupScreenshotsByDate(screenshotsDir) {
   return dailyBatches;
 }
 
+const geminiStatsFilePath = path.join(__dirname, "gemini_stats.json");
+
+function recordGeminiCallCLI(callDetail) {
+  try {
+    let stats = { lastRun: null, dailyStats: {}, history: [] };
+    if (fs.existsSync(geminiStatsFilePath)) {
+      try { stats = JSON.parse(fs.readFileSync(geminiStatsFilePath, "utf8")); } catch (e) {}
+    }
+    const utcDate = new Date().toISOString().split("T")[0];
+    if (!stats.dailyStats) stats.dailyStats = {};
+    if (!stats.dailyStats[utcDate]) {
+      stats.dailyStats[utcDate] = {
+        utcDate,
+        totalCalls: 0,
+        totalDurationMs: 0,
+        avgDurationMs: 0,
+        totalInputTokens: 0,
+        totalOutputTokens: 0,
+        totalTokens: 0,
+        models: {},
+        calls: []
+      };
+    }
+    const day = stats.dailyStats[utcDate];
+    day.totalCalls += 1;
+    day.totalDurationMs += callDetail.durationMs;
+    day.avgDurationMs = Math.round(day.totalDurationMs / day.totalCalls);
+    day.totalInputTokens += callDetail.inputTokens;
+    day.totalOutputTokens += callDetail.outputTokens;
+    day.totalTokens += callDetail.totalTokens;
+    if (!day.models) day.models = {};
+    day.models[callDetail.model] = (day.models[callDetail.model] || 0) + 1;
+
+    if (!day.calls) day.calls = [];
+    day.calls.unshift(callDetail);
+    if (day.calls.length > 50) day.calls.pop();
+
+    if (!stats.history) stats.history = [];
+    stats.history.unshift(callDetail);
+    if (stats.history.length > 100) stats.history.pop();
+
+    fs.writeFileSync(geminiStatsFilePath, JSON.stringify(stats, null, 2), "utf8");
+  } catch (err) {
+    console.error("Failed to record CLI Gemini call stats:", err);
+  }
+}
+
 // Wrapper to handle Gemini API transient errors (e.g. 503 Service Unavailable, 429 Rate Limit Exceeded)
-async function generateContentWithRetry(prompt, maxRetries = 5, initialDelayMs = 2000) {
+async function generateContentWithRetry(prompt, maxRetries = 5, initialDelayMs = 2000, meta = {}) {
   let attempt = 0;
+  const startTime = Date.now();
+  const modelName = "gemini-flash-latest";
   while (true) {
     try {
       const result = await model.generateContent(prompt);
+      const durationMs = Date.now() - startTime;
+      const durationSec = parseFloat((durationMs / 1000).toFixed(2));
+      
+      const responseText = result.response ? result.response.text() : "";
+      const usage = (result.response && result.response.usageMetadata) || {};
+      const inputTokens = usage.promptTokenCount !== undefined ? usage.promptTokenCount : Math.ceil(prompt.length / 4);
+      const outputTokens = usage.candidatesTokenCount !== undefined ? usage.candidatesTokenCount : Math.ceil(responseText.length / 4);
+      const totalTokens = usage.totalTokenCount !== undefined ? usage.totalTokenCount : (inputTokens + outputTokens);
+
+      recordGeminiCallCLI({
+        type: meta.type || "general",
+        model: modelName,
+        durationMs,
+        durationSec,
+        inputTokens,
+        outputTokens,
+        totalTokens,
+        timestamp: new Date().toISOString(),
+        itemCount: meta.itemCount || 1,
+        status: "success",
+        attempts: attempt + 1
+      });
+
       return result;
     } catch (error) {
       attempt++;
       if (attempt >= maxRetries) {
+        const durationMs = Date.now() - startTime;
+        recordGeminiCallCLI({
+          type: meta.type || "general",
+          model: modelName,
+          durationMs,
+          durationSec: parseFloat((durationMs / 1000).toFixed(2)),
+          inputTokens: Math.ceil(prompt.length / 4),
+          outputTokens: 0,
+          totalTokens: Math.ceil(prompt.length / 4),
+          timestamp: new Date().toISOString(),
+          itemCount: meta.itemCount || 1,
+          status: "error",
+          error: error.message,
+          attempts: attempt
+        });
         throw error;
       }
       const isTransient = error.status === 503 || error.status === 429 || 
