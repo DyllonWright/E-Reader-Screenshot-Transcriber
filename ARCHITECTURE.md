@@ -35,6 +35,7 @@ Both modes share the same core processing logic. The GUI server re-implements th
 ├── .ocr_cache/             Auto-managed JSON cache: {text, isTextPage, mtime} per screenshot filename
 ├── .pipeline_cache/        Per-date pipeline state: {draftContent, illustrations, status} (git-ignored)
 ├── meta.json               Auto-managed GUI persistence: {bookTitle, recentBooks[], imageContexts}
+├── gemini_stats.json       Auto-managed Gemini API response time & token specs log (24hr UTC window stats)
 ├── .env                    Secret: GEMINI_API_KEY (git-ignored, can be overwritten via GUI)
 └── eng.traineddata         Bundled Tesseract English language model (required by tesseract.js)
 ```
@@ -136,6 +137,8 @@ Contains the same algorithms (fuzzRatio, findOverlapFuzzy, checkHeaderColors, ge
 | `POST` | `/api/finalize` | Crop illustrations, replace placeholders, write MD and image files |
 | `GET` | `/api/archive-stream` | SSE stream: after finalize, move a date's raw screenshots to `archive/<date>/` (`mode=archive`) or send them to the Recycle Bin (`mode=delete`); stamps the pipeline cache `status: "archived"` |
 | `POST` | `/api/open-explorer` | Run `explorer.exe` pointing to `output/`, `input` (screenshots), or `archive` per `{target}` |
+| `GET` | `/api/gemini-stats` | Fetch Gemini API response times, model specs, and token usage aggregated by 24hr UTC windows |
+| `POST` | `/api/clear-gemini-stats` | Reset recorded Gemini stats history (`gemini_stats.json`) |
 
 **Port:** `3301` (avoids conflict with common dev servers on 3000)
 

@@ -2,6 +2,10 @@
 
 A Node.js pipeline for transcribing and archiving e-reader screenshots. Combines parallel local OCR, intelligent fuzzy text deduplication, full-screen illustration extraction, and AI-powered formatting — all wrapped in a beautiful one-click local web GUI.
 
+## 📺 Video Guide
+
+Watch the walkthrough: **[E-Reader Screenshot Transcriber — Usage Guide](https://youtu.be/qgqcT_7qKWU)**
+
 ## Capabilities
 
 *   **Local Web GUI:** A glassmorphic browser-based interface. Launch it by double-clicking `run.bat`. No installation steps needed — it self-bootstraps all dependencies on first run.
