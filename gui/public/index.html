@@ -14,7 +14,10 @@
     <div class="bg-gradient bg-grad-1"></div>
     <div class="bg-gradient bg-grad-2"></div>
     <div class="bg-gradient bg-grad-3"></div>
-    <div class="starfield" id="starfield"></div>
+    <div class="bg-gradient bg-grad-4"></div>
+    <div class="starfield" id="starfield">
+      <canvas id="cosmos-canvas"></canvas>
+    </div>
   </div>
 
   <div class="app-container">
@@ -32,6 +35,30 @@
         </div>
       </div>
       <div class="header-actions">
+        <div class="dim-slider-wrapper" title="Adjust Panel Glassmorphic Opacity / Dimness">
+          <span class="dim-label">Dim</span>
+          <input type="range" id="input-dim-slider" min="0.50" max="0.98" step="0.02" value="0.88">
+        </div>
+        <button id="btn-toggle-bg" class="btn btn-secondary btn-icon-text" title="Toggle Dynamic Cosmic / Minimal Background Mode">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="btn-icon">
+            <circle cx="12" cy="12" r="9"></circle>
+            <path d="M12 3a9 9 0 0 0 0 18z" fill="currentColor"></path>
+          </svg>
+          <span id="bg-toggle-label">Cosmic FX</span>
+        </button>
+        <button id="btn-focus-mode" class="btn btn-secondary btn-icon-text" title="Hide UI — View Cosmic Background Only">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="btn-icon">
+            <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
+            <circle cx="12" cy="12" r="3"></circle>
+          </svg>
+          <span id="focus-mode-label">Focus</span>
+        </button>
+        <button id="btn-dev-stats" class="btn btn-secondary btn-icon-text" title="Gemini API Specs & Response Times">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="btn-icon">
+            <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
+          </svg>
+          <span>Dev Stats</span>
+        </button>
         <button id="btn-show-explorer-header" class="btn btn-secondary btn-icon-only" title="Open Output in Explorer">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
@@ -71,7 +98,7 @@
         <div class="grid-2col">
           
           <!-- Left Column: Daily Batches + Settings -->
-          <div class="card glass-card scroll-container">
+          <div class="card glass-card">
             <h2 class="section-title">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="title-icon">
                 <rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect>
@@ -291,6 +318,7 @@
               Review & Finalize Names
             </h2>
             <p class="section-desc">The AI analyzed the surrounding text context and suggested these descriptive, Windows-safe filenames for the extracted full-screen illustrations. Modify them directly if desired.</p>
+            <div id="review-baseline-banner" class="baseline-banner hidden"></div>
           </div>
 
           <div id="review-list-grid" class="review-grid">
@@ -432,6 +460,89 @@
       <div class="modal-footer">
         <button id="btn-cancel-crop" class="btn btn-secondary">Cancel</button>
         <button id="btn-save-crop" class="btn btn-primary">Save Crop Region</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Dev Debug & Gemini Stats Modal -->
+  <div id="modal-dev-stats" class="modal-overlay hidden">
+    <div class="modal-card glass-card modal-dev-card">
+      <div class="modal-header">
+        <h3 class="section-title">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="title-icon text-brand-cyan">
+            <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
+          </svg>
+          Gemini Dev Specs &amp; Telemetry
+        </h3>
+        <button id="btn-close-dev-stats" class="btn-close">&times;</button>
+      </div>
+
+      <!-- Dev Modal Navigation Tabs -->
+      <div class="dev-tab-bar">
+        <button id="dev-tab-btn-overview" class="dev-tab-btn active">📋 Overview &amp; Specs</button>
+        <button id="dev-tab-btn-plots" class="dev-tab-btn">📈 Analysis Plots &amp; Telemetry</button>
+      </div>
+
+      <!-- TAB 1: OVERVIEW & SPECS -->
+      <div id="dev-tab-overview" class="modal-body-dev scroll-container">
+        <!-- Baseline Card: Last Transcribe Run -->
+        <div class="dev-section">
+          <h4 class="dev-subtitle">Last Transcribe Stage Baseline</h4>
+          <div id="dev-last-run-container" class="dev-last-run-card">
+            <p class="text-muted">No transcribe run recorded yet in this session.</p>
+          </div>
+        </div>
+
+        <!-- 24hr UTC Window Grouped Stats -->
+        <div class="dev-section">
+          <div class="dev-section-header">
+            <h4 class="dev-subtitle">Grouped 24hr UTC Windows</h4>
+            <span class="dev-badge">24h UTC Aggregation</span>
+          </div>
+          <div id="dev-utc-windows-container" class="dev-utc-windows-grid">
+            <p class="text-muted">Loading stats...</p>
+          </div>
+        </div>
+
+        <!-- Call History -->
+        <div class="dev-section">
+          <h4 class="dev-subtitle">Recent Gemini API Calls Log</h4>
+          <div id="dev-calls-history-container" class="dev-calls-history-list">
+            <p class="text-muted">No API calls recorded.</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- TAB 2: ANALYSIS PLOTS & TELEMETRY -->
+      <div id="dev-tab-plots" class="modal-body-dev scroll-container hidden">
+        <!-- Daily Quota Meter & Cache Hit Rate Summary -->
+        <div id="dev-quota-meter-container" class="dev-section">
+          <p class="text-muted">Loading quota &amp; telemetry metrics...</p>
+        </div>
+
+        <!-- Plot 1: Response Time & Stage Duration Trend -->
+        <div class="dev-section">
+          <h4 class="dev-subtitle">Gemini API Response Time &amp; Stage Duration Trend</h4>
+          <div id="chart-response-time" class="chart-container"></div>
+        </div>
+
+        <!-- Plot 2: Daily Token Usage Breakdown -->
+        <div class="dev-section">
+          <h4 class="dev-subtitle">Daily Token Usage Breakdown (24h UTC)</h4>
+          <div id="chart-token-usage" class="chart-container"></div>
+        </div>
+
+        <!-- Plot 3: Fuzzy Overlap Deduplication & Text Yield -->
+        <div class="dev-section">
+          <h4 class="dev-subtitle">Fuzzy Overlap Reduction &amp; OCR Yield</h4>
+          <div id="chart-dedup-reduction" class="chart-container"></div>
+        </div>
+      </div>
+
+      <div class="modal-footer dev-footer">
+        <button id="btn-clear-dev-stats" class="btn btn-secondary btn-small text-danger" title="Reset stats history">Clear Stats</button>
+        <button id="btn-refresh-dev-stats" class="btn btn-secondary btn-small">Refresh</button>
+        <button id="btn-close-dev-stats-footer" class="btn btn-primary btn-small">Close</button>
       </div>
     </div>
   </div>

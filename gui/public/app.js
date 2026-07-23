@@ -1,10 +1,569 @@
 // gui/public/app.js
 
 document.addEventListener("DOMContentLoaded", () => {
+  // --- Handcrafted Cosmic Starfield Canvas Engine ---
+  class CosmicStarfield {
+    constructor(canvasId) {
+      this.canvas = document.getElementById(canvasId);
+      if (!this.canvas) return;
+      this.ctx = this.canvas.getContext("2d");
+      if (!this.ctx) return;
+
+      this.stars = [];
+      this.meteors = [];
+      this.mouseX = 0;
+      this.mouseY = 0;
+      this.targetMouseX = 0;
+      this.targetMouseY = 0;
+      this.animationFrameId = null;
+      this.lastTime = performance.now();
+      this.nextMeteorTime = performance.now() + 6000 + Math.random() * 10000;
+      this.isLowMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+      // Realistic cosmic star color palette
+      this.colors = [
+        "rgba(255, 255, 255, ",   // Pure Radiant White
+        "rgba(165, 243, 252, ",   // Quasar Cyan Tint
+        "rgba(221, 214, 254, ",   // Esoteric Violet Tint
+        "rgba(254, 240, 138, ",   // Golden Starlight Tint
+        "rgba(251, 207, 232, "    // Warm Nebula Magenta Tint
+      ];
+
+      this.init();
+    }
+
+    init() {
+      this.resize();
+      this.createBlackHole();
+      this.createStars();
+      this.bindEvents();
+      this.animate(performance.now());
+    }
+
+    resize() {
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      this.width = window.innerWidth;
+      this.height = window.innerHeight;
+      this.canvas.width = this.width * dpr;
+      this.canvas.height = this.height * dpr;
+      this.ctx.scale(dpr, dpr);
+      this.createBlackHole();
+    }
+
+    createBlackHole() {
+      // Massive, colossal black hole positioned across lower background ("looking over the edge of a Gargantua void").
+      // Raised slightly (0.68 vs the old 0.72) so scrolling down lets the south polar jet peek up from the bottom edge.
+      this.bhCenterX = this.width * 0.5;
+      this.bhCenterY = this.height * 0.68;
+      this.bhRadius = 360; // Colossal event horizon radius
+      this.diskRotation = 0;
+
+      // Infalling accretion dust particles orbiting in the distant void
+      this.accretionDust = [];
+      const numDust = 50;
+      for (let i = 0; i < numDust; i++) {
+        this.accretionDust.push(this.generateDustParticle(true));
+      }
+    }
+
+    generateDustParticle(randomRadius = false) {
+      const minR = this.bhRadius + 20;
+      const maxR = 900;
+      const r = randomRadius ? minR + Math.random() * (maxR - minR) : maxR - Math.random() * 40;
+      const angle = Math.random() * Math.PI * 2;
+      const speed = 0.0003 + (200 / r) * 0.0002;
+      const inwardSpeed = 0.04 + (1 - r / maxR) * 0.08;
+
+      return {
+        r: r,
+        angle: angle,
+        speed: speed,
+        inwardSpeed: inwardSpeed,
+        size: 0.7 + Math.random() * 1.4,
+        baseHue: Math.random() < 0.5 ? 195 : 45
+      };
+    }
+
+    createStars() {
+      this.stars = [];
+      const density = (this.width * this.height) / 8500;
+      const totalStars = Math.min(Math.max(Math.floor(density), 130), 260);
+
+      for (let i = 0; i < totalStars; i++) {
+        const layer = Math.random() < 0.6 ? 1 : Math.random() < 0.85 ? 2 : 3;
+        
+        let baseRadius, baseOpacity, hasFlare;
+        if (layer === 1) {
+          baseRadius = 0.4 + Math.random() * 0.5;
+          baseOpacity = 0.15 + Math.random() * 0.25;
+          hasFlare = false;
+        } else if (layer === 2) {
+          baseRadius = 0.9 + Math.random() * 0.7;
+          baseOpacity = 0.35 + Math.random() * 0.4;
+          hasFlare = false;
+        } else {
+          baseRadius = 1.8 + Math.random() * 1.2;
+          baseOpacity = 0.65 + Math.random() * 0.35;
+          hasFlare = Math.random() < 0.75;
+        }
+
+        const randType = Math.random();
+        let starType = "standard";
+        if (randType > 0.92) {
+          starType = "chromatic";
+        } else if (randType > 0.82) {
+          starType = "gold";
+        }
+
+        const initialX = Math.random() * this.width;
+        const initialY = Math.random() * this.height;
+        const dx = initialX - this.bhCenterX;
+        const dy = initialY - this.bhCenterY;
+        const polarDist = Math.hypot(dx, dy);
+        const polarAngle = Math.atan2(dy, dx);
+        const orbitalSpeed = (0.000008 / Math.sqrt(layer)) * (1 / (1 + polarDist * 0.0005));
+
+        this.stars.push({
+          polarDist: polarDist,
+          polarAngle: polarAngle,
+          orbitalSpeed: orbitalSpeed,
+          radius: baseRadius,
+          layer: layer,
+          type: starType,
+          hue: Math.random() * 360,
+          hueSpeed: 0.02 + Math.random() * 0.05,
+          baseOpacity: baseOpacity,
+          twinkleSpeed: 0.001 + Math.random() * 0.003,
+          twinklePhase: Math.random() * Math.PI * 2,
+          hasFlare: hasFlare
+        });
+      }
+    }
+
+    bindEvents() {
+      this.scrollY = 0;
+      this.targetScrollY = 0;
+
+      window.addEventListener("resize", () => {
+        this.resize();
+        this.createStars();
+      }, { passive: true });
+
+      window.addEventListener("mousemove", (e) => {
+        if (this.isLowMotion) return;
+        this.targetMouseX = (e.clientX - this.width / 2) * 0.015;
+        this.targetMouseY = (e.clientY - this.height / 2) * 0.015;
+      }, { passive: true });
+
+      window.addEventListener("scroll", () => {
+        if (this.isLowMotion) return;
+        this.targetScrollY = window.scrollY || window.pageYOffset || 0;
+      }, { passive: true });
+
+      document.addEventListener("visibilitychange", () => {
+        if (document.hidden) {
+          if (this.animationFrameId) cancelAnimationFrame(this.animationFrameId);
+        } else {
+          this.lastTime = performance.now();
+          this.animate(performance.now());
+        }
+      });
+    }
+
+    spawnMeteor() {
+      if (this.isLowMotion) return;
+      const startX = Math.random() * (this.width * 0.7) + this.width * 0.3;
+      const startY = Math.random() * (this.height * 0.4);
+      const angle = (Math.PI / 4) + (Math.random() - 0.5) * 0.2;
+      const speed = 7 + Math.random() * 6;
+
+      this.meteors.push({
+        x: startX,
+        y: startY,
+        vx: -Math.cos(angle) * speed,
+        vy: Math.sin(angle) * speed,
+        length: 80 + Math.random() * 70,
+        life: 1.0,
+        decay: 0.015 + Math.random() * 0.01
+      });
+    }
+
+    renderPolarJetBeam(cx, cy, angle, isForeground) {
+      const jetLen = Math.max(this.width, this.height) * 0.75;
+      const alphaScale = isForeground ? 0.75 : 0.28;
+
+      this.ctx.save();
+      this.ctx.translate(cx, cy);
+      this.ctx.rotate(angle);
+
+      const jetGrad = this.ctx.createLinearGradient(0, 0, jetLen, 0);
+      jetGrad.addColorStop(0, `rgba(255, 255, 255, ${alphaScale.toFixed(2)})`);
+      jetGrad.addColorStop(0.12, `rgba(165, 243, 252, ${(alphaScale * 0.75).toFixed(2)})`);
+      jetGrad.addColorStop(0.45, `rgba(168, 85, 247, ${(alphaScale * 0.35).toFixed(2)})`);
+      jetGrad.addColorStop(1, "rgba(0, 0, 0, 0)");
+
+      this.ctx.fillStyle = jetGrad;
+      this.ctx.beginPath();
+      this.ctx.moveTo(0, -3);
+      this.ctx.lineTo(jetLen, -20);
+      this.ctx.lineTo(jetLen, 20);
+      this.ctx.lineTo(0, 3);
+      this.ctx.fill();
+
+      // Core intense photon beam ray
+      this.ctx.strokeStyle = `rgba(255, 255, 255, ${(alphaScale * 0.9).toFixed(2)})`;
+      this.ctx.lineWidth = 1.6;
+      this.ctx.beginPath();
+      this.ctx.moveTo(0, 0);
+      this.ctx.lineTo(jetLen, 0);
+      this.ctx.stroke();
+
+      this.ctx.restore();
+    }
+
+    renderBlackHole(delta, now) {
+      if (this.isLowMotion) return;
+      // Pan the hole upward as you scroll so the south (bottom) jet rises into view.
+      // Clamped: a short scroll gives a strong reveal, but it never flies off-screen
+      // on taller wizard steps that scroll far.
+      const scrollPanUp = Math.min((this.scrollY || 0) * 1.4, 430);
+      const cx = this.bhCenterX + this.mouseX * 0.3;
+      const cy = (this.bhCenterY - scrollPanUp) + this.mouseY * 0.3;
+      const R = this.bhRadius;
+
+      // --- Tilted-disk model ---
+      // One angle drives the whole system: the screen-space lean of the disk's
+      // major axis. Negative lifts the right edge ("/" lean).
+      this.diskRotation += 0.00008 * delta;
+      const diskTiltRotation = -0.38; // ~22° "/" lean
+
+      // Disk lies in the equatorial plane. We view it near edge-on, so it reads
+      // as a thin ellipse:
+      //   - major axis: unscaled (diskScaleX = 1.0), so a ring at radius r lands
+      //     at screen radius r — the inner ring at R*1.12 hugs the event-horizon
+      //     circle instead of floating off to the side (the old 2.0 stretched
+      //     every ring to twice the horizon width and detached the disk).
+      //   - minor axis (depth): squashed by diskForeshorten for the edge-on look.
+      const diskScaleX = 1.0;
+      const diskForeshorten = 0.32;
+
+      // The spin axis is PERPENDICULAR to the disk plane, so the jets emerge
+      // through the disk's faces — along the disk's minor axis in screen space,
+      // not along its length. north-pole direction = disk major axis turned 90°:
+      // (sin θ, -cos θ). With θ = -0.38 that points up-and-left; the south pole
+      // mirrors it down-and-right, so the two jets sit on the "\" diagonal and
+      // cross the "/" disk at a right angle. (dot product with the disk major
+      // axis is exactly 0 — provably perpendicular.)
+      const axisX = Math.sin(diskTiltRotation);
+      const axisY = -Math.cos(diskTiltRotation);
+
+      // The axis also tilts toward the viewer, so the poles project onto the
+      // sphere's faces rather than its silhouette. poleProject < 1 pulls each
+      // pole in from the rim: the NEAR (north/top) pole lands on the visible
+      // near face — in our sight — while the FAR (south/bottom) pole lands on
+      // the back face, where the event-horizon fill (drawn after the south jet)
+      // occludes it. 1.0 would put both back on the rim edge-on.
+      const poleProject = 0.60;
+      const northPoleX = cx + axisX * R * poleProject;
+      const northPoleY = cy + axisY * R * poleProject;
+      const southPoleX = cx - axisX * R * poleProject;
+      const southPoleY = cy - axisY * R * poleProject;
+
+      const northJetAngle = Math.atan2(axisY, axisX); // toward the (upper-left) north pole
+      const southJetAngle = Math.atan2(-axisY, -axisX); // toward the (lower-right) south pole
+
+      // Subtle precession wobble in jet angle
+      const wobble = Math.sin(now * 0.00006) * 0.04;
+
+      this.ctx.save();
+
+      // --- Layer 1: South polar jet beam (behind disk & event horizon) ---
+      this.renderPolarJetBeam(southPoleX, southPoleY, southJetAngle + wobble, false);
+
+      // --- Layer 2: Accretion Disk (in front of south jet, behind north jet) ---
+      // Disk geometry: We view the disk plane nearly edge-on.
+      // The disk ellipse major axis is perpendicular to the spin axis.
+      // diskScaleX = 1.0 (natural canvas units match R)
+      // diskScaleY = sin(axisTilt) = how thin the edge-on foreshortening makes the disk
+      // The rotation aligns the major axis perpendicular to spin axis in screen space.
+      // To ring at radius r in disk coords: screen semi-major = r*diskScaleX, screen semi-minor = r*diskScaleY
+      // So ring at R*1.15 will appear to just surround the event horizon circle of radius R.
+      this.ctx.save();
+      this.ctx.translate(cx, cy);
+      this.ctx.rotate(diskTiltRotation);
+      this.ctx.scale(diskScaleX, diskForeshorten);
+
+      // Outer plasma glow gradient — starts at event horizon edge
+      const outerGrad = this.ctx.createRadialGradient(0, 0, R, 0, 0, R * 4.5);
+      outerGrad.addColorStop(0,    "rgba(255, 255, 255, 0.40)");
+      outerGrad.addColorStop(0.10, "rgba(165, 243, 252, 0.22)");
+      outerGrad.addColorStop(0.35, "rgba(245, 158, 11,  0.14)");
+      outerGrad.addColorStop(0.70, "rgba(168,  85, 247, 0.08)");
+      outerGrad.addColorStop(1,    "rgba(0, 0, 0, 0)");
+      this.ctx.fillStyle = outerGrad;
+      this.ctx.beginPath();
+      this.ctx.arc(0, 0, R * 4.5, 0, Math.PI * 2);
+      this.ctx.fill();
+
+      // Concentric ring bands proportional to event horizon radius R
+      const ringRadii = [R * 1.12, R * 1.5, R * 2.1, R * 3.0];
+      const ringAlphas = [0.22, 0.13, 0.08, 0.04];
+      for (let rIdx = 0; rIdx < ringRadii.length; rIdx++) {
+        this.ctx.strokeStyle = `rgba(165, 243, 252, ${ringAlphas[rIdx].toFixed(2)})`;
+        this.ctx.lineWidth = 2.2 - rIdx * 0.4;
+        this.ctx.beginPath();
+        this.ctx.arc(0, 0, ringRadii[rIdx], 0, Math.PI * 2);
+        this.ctx.stroke();
+      }
+
+      // Spinning dust particles in disk plane
+      for (let i = 0; i < this.accretionDust.length; i++) {
+        const p = this.accretionDust[i];
+        p.angle += p.speed * delta;
+        p.r -= p.inwardSpeed * (delta / 16);
+
+        if (p.r <= R + 8) {
+          this.accretionDust[i] = this.generateDustParticle(false);
+          continue;
+        }
+
+        const px = Math.cos(p.angle + this.diskRotation) * p.r;
+        const py = Math.sin(p.angle + this.diskRotation) * p.r;
+        const proximityRatio = Math.max(0, 1 - (p.r - R) / 700);
+        const alpha = (0.10 + proximityRatio * 0.38).toFixed(2);
+        const hue = p.baseHue + (200 - p.baseHue) * proximityRatio;
+
+        this.ctx.fillStyle = `hsla(${hue.toFixed(0)}, 95%, 75%, ${alpha})`;
+        this.ctx.beginPath();
+        this.ctx.arc(px, py, p.size * (1 + proximityRatio * 0.4), 0, Math.PI * 2);
+        this.ctx.fill();
+      }
+
+      this.ctx.restore();
+
+      // --- Layer 3: Event Horizon void — drawn on top of disk, below north jet ---
+      this.ctx.beginPath();
+      this.ctx.arc(cx, cy, R, 0, Math.PI * 2);
+      this.ctx.fillStyle = "#010207";
+      this.ctx.fill();
+
+      // Photon sphere / gravitational lensing glow ring
+      this.ctx.lineWidth = 2.0;
+      this.ctx.strokeStyle = "rgba(165, 243, 252, 0.40)";
+      this.ctx.stroke();
+
+      const lensGrad = this.ctx.createRadialGradient(cx, cy, R, cx, cy, R * 1.6);
+      lensGrad.addColorStop(0,   "rgba(255, 255, 255, 0.18)");
+      lensGrad.addColorStop(0.4, "rgba(165, 243, 252, 0.08)");
+      lensGrad.addColorStop(1,   "rgba(0, 0, 0, 0)");
+      this.ctx.fillStyle = lensGrad;
+      this.ctx.beginPath();
+      this.ctx.arc(cx, cy, R * 1.6, 0, Math.PI * 2);
+      this.ctx.fill();
+
+      // --- Layer 4: North polar jet beam — on top of everything, emerging from pole apex ---
+      this.renderPolarJetBeam(northPoleX, northPoleY, northJetAngle - wobble, true);
+
+      this.ctx.restore();
+    }
+
+    animate(now) {
+      const delta = now - this.lastTime;
+      this.lastTime = now;
+
+      this.mouseX += (this.targetMouseX - this.mouseX) * 0.05;
+      this.mouseY += (this.targetMouseY - this.mouseY) * 0.05;
+      this.scrollY += ((this.targetScrollY || 0) - (this.scrollY || 0)) * 0.08;
+
+      this.ctx.clearRect(0, 0, this.width, this.height);
+
+      this.renderBlackHole(delta, now);
+
+      // Pan the hole upward as you scroll so the south (bottom) jet rises into view.
+      // Clamped: a short scroll gives a strong reveal, but it never flies off-screen
+      // on taller wizard steps that scroll far.
+      const scrollPanUp = Math.min((this.scrollY || 0) * 1.4, 430);
+
+      for (let i = 0; i < this.stars.length; i++) {
+        const star = this.stars[i];
+
+        star.polarAngle += star.orbitalSpeed * delta;
+        const currentX = this.bhCenterX + Math.cos(star.polarAngle) * star.polarDist;
+        const currentY = (this.bhCenterY - scrollPanUp) + Math.sin(star.polarAngle) * star.polarDist;
+
+        const parallaxX = this.mouseX * star.layer;
+        const parallaxY = this.mouseY * star.layer;
+        const renderX = currentX + parallaxX;
+        const renderY = currentY + parallaxY;
+
+        star.twinklePhase += star.twinkleSpeed * delta;
+        const twinkleAlpha = star.baseOpacity * (0.7 + 0.3 * Math.sin(star.twinklePhase));
+
+        // Determine color styling based on star type
+        let fillStyle, strokeStyle;
+        if (star.type === "chromatic") {
+          // Smoothly shift hue through red -> green -> blue -> cyan -> magenta
+          star.hue = (star.hue + star.hueSpeed * delta) % 360;
+          fillStyle = `hsla(${star.hue.toFixed(1)}, 95%, 68%, ${twinkleAlpha.toFixed(3)})`;
+          strokeStyle = `hsla(${star.hue.toFixed(1)}, 95%, 68%, ${(twinkleAlpha * 0.55).toFixed(3)})`;
+        } else if (star.type === "gold") {
+          fillStyle = `hsla(45, 95%, 65%, ${twinkleAlpha.toFixed(3)})`;
+          strokeStyle = `hsla(45, 95%, 65%, ${(twinkleAlpha * 0.5).toFixed(3)})`;
+        } else {
+          // Standard white star
+          fillStyle = `rgba(255, 255, 255, ${twinkleAlpha.toFixed(3)})`;
+          strokeStyle = `rgba(255, 255, 255, ${(twinkleAlpha * 0.45).toFixed(3)})`;
+        }
+
+        this.ctx.beginPath();
+        this.ctx.arc(renderX, renderY, star.radius, 0, Math.PI * 2);
+        this.ctx.fillStyle = fillStyle;
+        this.ctx.fill();
+
+        if (star.hasFlare && star.layer === 3) {
+          const flareLen = star.radius * (3.5 + Math.sin(star.twinklePhase * 1.5) * 1.2);
+
+          this.ctx.strokeStyle = strokeStyle;
+          this.ctx.lineWidth = 0.7;
+          this.ctx.beginPath();
+          this.ctx.moveTo(renderX - flareLen, renderY);
+          this.ctx.lineTo(renderX + flareLen, renderY);
+          this.ctx.moveTo(renderX, renderY - flareLen);
+          this.ctx.lineTo(renderX, renderY + flareLen);
+          this.ctx.stroke();
+        }
+      }
+
+      if (now > this.nextMeteorTime) {
+        this.spawnMeteor();
+        this.nextMeteorTime = now + 14000 + Math.random() * 18000;
+      }
+
+      for (let i = this.meteors.length - 1; i >= 0; i--) {
+        const m = this.meteors[i];
+        m.x += m.vx;
+        m.y += m.vy;
+        m.life -= m.decay;
+
+        if (m.life <= 0 || m.x < 0 || m.y > this.height) {
+          this.meteors.splice(i, 1);
+          continue;
+        }
+
+        const tailX = m.x - (m.vx / Math.hypot(m.vx, m.vy)) * m.length;
+        const tailY = m.y - (m.vy / Math.hypot(m.vx, m.vy)) * m.length;
+
+        const grad = this.ctx.createLinearGradient(m.x, m.y, tailX, tailY);
+        grad.addColorStop(0, `rgba(255, 255, 255, ${(m.life * 0.9).toFixed(3)})`);
+        grad.addColorStop(0.3, `rgba(165, 243, 252, ${(m.life * 0.6).toFixed(3)})`);
+        grad.addColorStop(1, `rgba(168, 85, 247, 0)`);
+
+        this.ctx.strokeStyle = grad;
+        this.ctx.lineWidth = 1.4 * m.life;
+        this.ctx.lineCap = "round";
+        this.ctx.beginPath();
+        this.ctx.moveTo(m.x, m.y);
+        this.ctx.lineTo(tailX, tailY);
+        this.ctx.stroke();
+      }
+
+      this.animationFrameId = requestAnimationFrame((t) => this.animate(t));
+    }
+  }
+
+  // Initialize Cosmic Canvas
+  const cosmicStarfield = new CosmicStarfield("cosmos-canvas");
+
+  // --- Background Toggle Handler (Cosmic FX vs Minimalist Mode) ---
+  const btnToggleBg = document.getElementById("btn-toggle-bg");
+  const bgToggleLabel = document.getElementById("bg-toggle-label");
+  const cosmosEl = document.querySelector(".cosmos");
+
+  function setBgMode(isMinimalist) {
+    if (!cosmosEl) return;
+    if (isMinimalist) {
+      cosmosEl.classList.add("minimalist");
+      if (bgToggleLabel) bgToggleLabel.textContent = "Minimal BG";
+      localStorage.setItem("evie_bg_minimalist", "true");
+    } else {
+      cosmosEl.classList.remove("minimalist");
+      if (bgToggleLabel) bgToggleLabel.textContent = "Cosmic FX";
+      localStorage.setItem("evie_bg_minimalist", "false");
+    }
+  }
+
+  // Restore saved user background preference
+  const savedMinimalist = localStorage.getItem("evie_bg_minimalist") === "true";
+  setBgMode(savedMinimalist);
+
+  if (btnToggleBg) {
+    btnToggleBg.addEventListener("click", () => {
+      const isCurrentlyMinimal = cosmosEl ? cosmosEl.classList.contains("minimalist") : false;
+      setBgMode(!isCurrentlyMinimal);
+    });
+  }
+
+  // --- Panel Dimming Slider Handler ---
+  const inputDimSlider = document.getElementById("input-dim-slider");
+
+  function setPanelDim(val) {
+    const opacity = parseFloat(val) || 0.88;
+    document.documentElement.style.setProperty("--bg-card", `rgba(10, 11, 24, ${opacity})`);
+    if (inputDimSlider) inputDimSlider.value = opacity;
+    localStorage.setItem("evie_panel_dim", opacity.toString());
+  }
+
+  // Restore saved panel dimming preference
+  const savedDim = localStorage.getItem("evie_panel_dim") || "0.88";
+  setPanelDim(savedDim);
+
+  if (inputDimSlider) {
+    inputDimSlider.addEventListener("input", (e) => {
+      setPanelDim(e.target.value);
+    });
+  }
+
+  // --- Focus Mode Handler (Hide UI panels, show only cosmic canvas) ---
+  const btnFocusMode = document.getElementById("btn-focus-mode");
+  const focusModeLabel = document.getElementById("focus-mode-label");
+
+  // Focus mode dims the whole workspace, so the class lives on <body>
+  // (an ancestor of both the UI and the cosmos background), not on the
+  // background layer itself — otherwise the CSS selectors reach nothing.
+  function setFocusMode(active) {
+    if (active) {
+      document.body.classList.add("focus-mode");
+      if (focusModeLabel) focusModeLabel.textContent = "Exit Focus";
+      localStorage.setItem("evie_focus_mode", "true");
+    } else {
+      document.body.classList.remove("focus-mode");
+      if (focusModeLabel) focusModeLabel.textContent = "Focus";
+      localStorage.setItem("evie_focus_mode", "false");
+    }
+  }
+
+  const savedFocusMode = localStorage.getItem("evie_focus_mode") === "true";
+  setFocusMode(savedFocusMode);
+
+  if (btnFocusMode) {
+    btnFocusMode.addEventListener("click", () => {
+      setFocusMode(!document.body.classList.contains("focus-mode"));
+    });
+  }
+
+  // Esc always exits focus mode — a reliable way out if the pointer
+  // strays from the header.
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && document.body.classList.contains("focus-mode")) {
+      setFocusMode(false);
+    }
+  });
+
   // --- Application State ---
   let appState = {
     bookTitle: "",
     recentBooks: [],
+    dailyQuotaTarget: 50,
     apiKeyPresent: false,
     dates: [],
     datesInfo: [],
@@ -13,7 +572,8 @@ document.addEventListener("DOMContentLoaded", () => {
     groups: {},
     selectedDate: "",
     draftContent: "",
-    illustrations: [] // From AI: { originalFile, suggestedName, time }
+    illustrations: [], // From AI: { originalFile, suggestedName, time }
+    lastRunStats: null
   };
   let ocrPollTimeout = null;
   let geminiTimerId = null;
@@ -29,6 +589,18 @@ document.addEventListener("DOMContentLoaded", () => {
   const panelProcess = document.getElementById("panel-process");
   const panelReview = document.getElementById("panel-review");
   const panelSuccess = document.getElementById("panel-success");
+
+  // Dev Stats DOM elements
+  const btnDevStats = document.getElementById("btn-dev-stats");
+  const modalDevStats = document.getElementById("modal-dev-stats");
+  const btnCloseDevStats = document.getElementById("btn-close-dev-stats");
+  const btnCloseDevStatsFooter = document.getElementById("btn-close-dev-stats-footer");
+  const btnRefreshDevStats = document.getElementById("btn-refresh-dev-stats");
+  const btnClearDevStats = document.getElementById("btn-clear-dev-stats");
+  const devLastRunContainer = document.getElementById("dev-last-run-container");
+  const devUtcWindowsContainer = document.getElementById("dev-utc-windows-container");
+  const devCallsHistoryContainer = document.getElementById("dev-calls-history-container");
+  const reviewBaselineBanner = document.getElementById("review-baseline-banner");
 
   const batchListContainer = document.getElementById("batch-list-container");
   const statWrapper = document.getElementById("stat-cards-wrapper");
@@ -113,11 +685,13 @@ document.addEventListener("DOMContentLoaded", () => {
 
       appState.bookTitle = data.bookTitle;
       appState.recentBooks = data.recentBooks || [];
+      appState.dailyQuotaTarget = data.dailyQuotaTarget || appState.dailyQuotaTarget || 50;
       appState.apiKeyPresent = data.apiKeyPresent;
       appState.dates = data.dates;
       appState.datesInfo = data.datesInfo || [];
       appState.archivedInfo = data.archivedInfo || [];
       appState.groups = data.groups;
+      appState.lastRunStats = data.lastRunStats || null;
       appState.totalScreenshots = (data.datesInfo || []).reduce((sum, d) => sum + (d.totalFiles || 0), 0);
 
       // Populate Settings Inputs (don't clobber the field while the user is editing it)
@@ -571,6 +1145,9 @@ document.addEventListener("DOMContentLoaded", () => {
         const data = await res.json();
         if (!data.success) throw new Error(data.error);
 
+        if (data.cache.lastRunSummary) {
+          appState.lastRunStats = data.cache.lastRunSummary;
+        }
         appState.draftContent = data.cache.draftContent;
         appState.illustrations = data.cache.illustrations.map(ill => ({
           ...ill,
@@ -648,6 +1225,9 @@ document.addEventListener("DOMContentLoaded", () => {
           appendLog("AI Analysis Success!", "success");
           sse.close();
 
+          if (data.lastRunSummary) {
+            appState.lastRunStats = data.lastRunSummary;
+          }
           appState.draftContent = data.reviewData.draftContent;
           appState.illustrations = data.reviewData.illustrations.map(ill => ({
             ...ill,
@@ -707,6 +1287,7 @@ document.addEventListener("DOMContentLoaded", () => {
   // 5. Review & Finalize Form Renders
   function renderReviewPanel() {
     setStepActive(stepReview, panelReview);
+    renderBaselineBanner(reviewBaselineBanner, appState.lastRunStats);
     reviewGrid.innerHTML = "";
 
     if (appState.illustrations.length === 0) {
@@ -1251,6 +1832,440 @@ document.addEventListener("DOMContentLoaded", () => {
       frag.appendChild(star);
     }
     field.appendChild(frag);
+  }
+
+  // Dev Debug Modal & Stats Handlers
+  const tabBtnOverview = document.getElementById("dev-tab-btn-overview");
+  const tabBtnPlots = document.getElementById("dev-tab-btn-plots");
+  const devTabOverview = document.getElementById("dev-tab-overview");
+  const devTabPlots = document.getElementById("dev-tab-plots");
+
+  if (tabBtnOverview && tabBtnPlots) {
+    tabBtnOverview.addEventListener("click", () => {
+      tabBtnOverview.classList.add("active");
+      tabBtnPlots.classList.remove("active");
+      if (devTabOverview) devTabOverview.classList.remove("hidden");
+      if (devTabPlots) devTabPlots.classList.add("hidden");
+    });
+
+    tabBtnPlots.addEventListener("click", () => {
+      tabBtnPlots.classList.add("active");
+      tabBtnOverview.classList.remove("active");
+      if (devTabOverview) devTabOverview.classList.add("hidden");
+      if (devTabPlots) devTabPlots.classList.remove("hidden");
+      fetchAndRenderDevStats();
+    });
+  }
+
+  if (btnDevStats) {
+    btnDevStats.addEventListener("click", () => {
+      if (modalDevStats) modalDevStats.classList.remove("hidden");
+      fetchAndRenderDevStats();
+    });
+  }
+
+  [btnCloseDevStats, btnCloseDevStatsFooter].forEach(btn => {
+    if (btn) {
+      btn.addEventListener("click", () => {
+        if (modalDevStats) modalDevStats.classList.add("hidden");
+      });
+    }
+  });
+
+  if (btnRefreshDevStats) {
+    btnRefreshDevStats.addEventListener("click", fetchAndRenderDevStats);
+  }
+
+  if (btnClearDevStats) {
+    btnClearDevStats.addEventListener("click", async () => {
+      if (confirm("Are you sure you want to clear all recorded Gemini API stats?")) {
+        try {
+          const res = await fetch("/api/clear-gemini-stats", { method: "POST" });
+          const data = await res.json();
+          if (data.success) {
+            fetchAndRenderDevStats();
+          }
+        } catch (err) {
+          alert("Failed to clear stats: " + err.message);
+        }
+      }
+    });
+  }
+
+  async function fetchAndRenderDevStats() {
+    if (!devLastRunContainer || !devUtcWindowsContainer || !devCallsHistoryContainer) return;
+    try {
+      devLastRunContainer.innerHTML = `<p class="text-muted">Fetching latest baseline metrics...</p>`;
+      devUtcWindowsContainer.innerHTML = `<p class="text-muted">Loading 24hr UTC windows...</p>`;
+      devCallsHistoryContainer.innerHTML = `<p class="text-muted">Loading call history...</p>`;
+
+      const res = await fetch("/api/gemini-stats");
+      const data = await res.json();
+      if (!data.success) throw new Error(data.error);
+
+      const stats = data.stats || {};
+      renderDevLastRun(stats.lastRun);
+      renderDevUtcWindows(stats.dailyStats);
+      renderDevCallsHistory(stats.history);
+      renderQuotaMeterAndTelemetry(stats.lastRun, stats.dailyStats);
+      renderResponseTimeChart(stats.history, stats.dailyStats);
+      renderTokenUsageChart(stats.dailyStats);
+      renderDedupReductionChart(stats.lastRun, stats.dailyStats);
+    } catch (err) {
+      devLastRunContainer.innerHTML = `<p class="text-danger">Failed to load stats: ${err.message}</p>`;
+    }
+  }
+
+  function renderDevLastRun(lastRun) {
+    if (!devLastRunContainer) return;
+    if (!lastRun) {
+      devLastRunContainer.innerHTML = `<p class="text-muted">No transcribe run recorded yet in this session.</p>`;
+      return;
+    }
+    const timeStr = lastRun.timestamp ? new Date(lastRun.timestamp).toLocaleTimeString() : "N/A";
+    const dateStr = lastRun.date || "N/A";
+    const stageSec = lastRun.stage2TotalDurationSec !== undefined ? `${lastRun.stage2TotalDurationSec}s` : `${(lastRun.stage2TotalDurationMs / 1000).toFixed(1)}s`;
+    const geminiSec = lastRun.geminiDurationSec !== undefined ? `${lastRun.geminiDurationSec}s` : `${(lastRun.geminiDurationMs / 1000).toFixed(1)}s`;
+    const calls = lastRun.callsCount || (lastRun.calls ? lastRun.calls.length : 0);
+    const tokens = (lastRun.totalTokens || 0).toLocaleString();
+    const inTokens = (lastRun.totalInputTokens || 0).toLocaleString();
+    const outTokens = (lastRun.totalOutputTokens || 0).toLocaleString();
+
+    // Telemetry additions
+    const hitRate = lastRun.ocrStats ? `${lastRun.ocrStats.hitRatePct}%` : '100%';
+    const dedupRed = lastRun.dedupStats ? `${lastRun.dedupStats.reductionPct}%` : '0%';
+    const totalWords = lastRun.yieldStats ? (lastRun.yieldStats.totalWords || 0).toLocaleString() : 'N/A';
+
+    devLastRunContainer.innerHTML = `
+      <div class="dev-metric-grid">
+        <div class="dev-metric-box">
+          <span class="dev-metric-val text-brand-cyan">${stageSec}</span>
+          <span class="dev-metric-lbl">Total Stage 2 Time</span>
+        </div>
+        <div class="dev-metric-box">
+          <span class="dev-metric-val text-brand-purple">${geminiSec}</span>
+          <span class="dev-metric-lbl">Gemini Response Time</span>
+        </div>
+        <div class="dev-metric-box">
+          <span class="dev-metric-val">${calls}</span>
+          <span class="dev-metric-lbl">API Calls</span>
+        </div>
+        <div class="dev-metric-box">
+          <span class="dev-metric-val">${tokens}</span>
+          <span class="dev-metric-lbl">Total Tokens</span>
+        </div>
+      </div>
+      <div class="dev-submeta">
+        <span><b>Batch Date:</b> ${dateStr} at ${timeStr}</span> &bull; 
+        <span><b>OCR Hit Rate:</b> ${hitRate}</span> &bull; 
+        <span><b>Dedup Reduction:</b> ${dedupRed}</span> &bull; 
+        <span><b>Words Output:</b> ${totalWords}</span> &bull; 
+        <span><b>Prompt Tokens:</b> ${inTokens}</span> &bull; 
+        <span><b>Model:</b> <code>gemini-flash-latest</code></span>
+      </div>
+    `;
+  }
+
+  function renderDevUtcWindows(dailyStats) {
+    if (!devUtcWindowsContainer) return;
+    if (!dailyStats || Object.keys(dailyStats).length === 0) {
+      devUtcWindowsContainer.innerHTML = `<p class="text-muted">No 24hr UTC windows recorded yet.</p>`;
+      return;
+    }
+
+    const sortedDates = Object.keys(dailyStats).sort().reverse();
+    devUtcWindowsContainer.innerHTML = "";
+
+    sortedDates.forEach(utcDate => {
+      const day = dailyStats[utcDate];
+      const totalSec = (day.totalDurationMs / 1000).toFixed(1);
+      const avgSec = (day.avgDurationMs / 1000).toFixed(1);
+      const tokens = (day.totalTokens || 0).toLocaleString();
+      const inTokens = (day.totalInputTokens || 0).toLocaleString();
+      const outTokens = (day.totalOutputTokens || 0).toLocaleString();
+      const models = Object.keys(day.models || {}).join(", ") || "gemini-flash-latest";
+
+      const card = document.createElement("div");
+      card.className = "utc-window-card";
+      card.innerHTML = `
+        <div class="utc-window-header">
+          <span class="utc-window-date">🌐 ${utcDate} (24h UTC Window)</span>
+          <span class="utc-window-calls">${day.totalCalls} API Call${day.totalCalls === 1 ? '' : 's'}</span>
+        </div>
+        <div class="utc-window-metrics">
+          <div class="utc-m-item">
+            <span class="utc-m-label">Total Response Time</span>
+            <span class="utc-m-value text-brand-cyan">${totalSec}s</span>
+          </div>
+          <div class="utc-m-item">
+            <span class="utc-m-label">Avg Call Duration</span>
+            <span class="utc-m-value">${avgSec}s</span>
+          </div>
+          <div class="utc-m-item">
+            <span class="utc-m-label">Total Tokens</span>
+            <span class="utc-m-value text-brand-purple">${tokens}</span>
+          </div>
+          <div class="utc-m-item">
+            <span class="utc-m-label">Prompt / Out Tokens</span>
+            <span class="utc-m-value">${inTokens} / ${outTokens}</span>
+          </div>
+        </div>
+        <div class="utc-window-specs">
+          <span><b>Model Specs:</b> <code>${models}</code></span>
+        </div>
+      `;
+      devUtcWindowsContainer.appendChild(card);
+    });
+  }
+
+  function renderDevCallsHistory(history) {
+    if (!devCallsHistoryContainer) return;
+    if (!history || history.length === 0) {
+      devCallsHistoryContainer.innerHTML = `<p class="text-muted">No API calls in history.</p>`;
+      return;
+    }
+
+    devCallsHistoryContainer.innerHTML = "";
+    history.slice(0, 30).forEach(call => {
+      const time = new Date(call.timestamp).toLocaleTimeString();
+      const date = new Date(call.timestamp).toLocaleDateString();
+      const sec = call.durationSec !== undefined ? call.durationSec : (call.durationMs / 1000).toFixed(1);
+      const isError = call.status === "error";
+
+      const item = document.createElement("div");
+      item.className = `call-history-item ${isError ? 'call-error' : ''}`;
+      item.innerHTML = `
+        <div class="chi-row">
+          <span class="chi-type ${call.type}">${(call.type || 'general').toUpperCase()}</span>
+          <span class="chi-time">${date} ${time}</span>
+          <span class="chi-duration ${isError ? 'text-danger' : 'text-brand-cyan'}">${sec}s</span>
+        </div>
+        <div class="chi-meta">
+          <span>Model: <code>${call.model || 'gemini-flash-latest'}</code></span> &bull; 
+          <span>Tokens: ${(call.totalTokens || 0).toLocaleString()} (In: ${call.inputTokens || 0}, Out: ${call.outputTokens || 0})</span>
+          ${call.itemCount ? ` &bull; <span>Items: ${call.itemCount}</span>` : ''}
+          ${isError ? `<div class="chi-err-msg">Error: ${call.error}</div>` : ''}
+        </div>
+      `;
+      devCallsHistoryContainer.appendChild(item);
+    });
+  }
+
+  function renderQuotaMeterAndTelemetry(lastRun, dailyStats, targetLimit = null) {
+    const container = document.getElementById("dev-quota-meter-container");
+    if (!container) return;
+
+    const utcToday = new Date().toISOString().split("T")[0];
+    const todayData = (dailyStats && dailyStats[utcToday]) || {};
+    const callsToday = todayData.totalCalls || 0;
+    const limit = targetLimit || appState.dailyQuotaTarget || 50;
+    const pct = Math.min(100, parseFloat(((callsToday / limit) * 100).toFixed(1)));
+    const ocrHitPct = lastRun && lastRun.ocrStats ? lastRun.ocrStats.hitRatePct : 100;
+    const dedupRed = lastRun && lastRun.dedupStats ? lastRun.dedupStats.reductionPct : 0;
+    const words = lastRun && lastRun.yieldStats ? lastRun.yieldStats.totalWords : 0;
+
+    container.innerHTML = `
+      <div class="quota-meter-card">
+        <div class="qm-header">
+          <span class="qm-title">Daily API Pings Today (24h UTC Window)</span>
+          <div class="qm-target-selector">
+            <label for="select-quota-target" class="qm-target-label">Target Limit:</label>
+            <select id="select-quota-target" class="qm-select">
+              <option value="20" ${limit === 20 ? 'selected' : ''}>20 pings/day (Strict limit)</option>
+              <option value="50" ${limit === 50 ? 'selected' : ''}>50 pings/day (Standard target)</option>
+              <option value="200" ${limit === 200 ? 'selected' : ''}>200 pings/day (Heavy usage)</option>
+              <option value="1500" ${limit === 1500 ? 'selected' : ''}>1,500 pings/day (Flash Max)</option>
+            </select>
+          </div>
+        </div>
+        <div class="qm-count-row">
+          <span class="qm-badge-large">${callsToday} / ${limit.toLocaleString()} pings today (${pct}%)</span>
+        </div>
+        <div class="progress-bar-bg" style="height: 10px; margin-bottom: 14px;">
+          <div class="progress-bar-fill ${pct > 80 ? 'bg-danger' : ''}" style="width: ${Math.max(2, pct)}%;"></div>
+        </div>
+        <div class="telemetry-pill-row">
+          <div class="telemetry-pill">⚡ OCR Cache Hit Rate: <b>${ocrHitPct}%</b></div>
+          <div class="telemetry-pill">✂️ Dedup Prompt Reduction: <b>${dedupRed}%</b></div>
+          <div class="telemetry-pill">📝 Words Yield: <b>${words.toLocaleString()} words</b></div>
+        </div>
+      </div>
+    `;
+
+    const selectTarget = document.getElementById("select-quota-target");
+    if (selectTarget) {
+      selectTarget.addEventListener("change", async (e) => {
+        const val = Number(e.target.value);
+        appState.dailyQuotaTarget = val;
+        try {
+          await fetch("/api/settings", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ dailyQuotaTarget: val })
+          });
+          renderQuotaMeterAndTelemetry(lastRun, dailyStats, val);
+        } catch (err) {
+          console.error("Error saving quota target:", err);
+        }
+      });
+    }
+  }
+
+  // --- SVG Visual Analysis Charts (Tab 2) ---
+
+  // Plot 1: Response Duration Line / Bar Chart
+  function renderResponseTimeChart(history, dailyStats) {
+    const container = document.getElementById("chart-response-time");
+    if (!container) return;
+
+    const items = (history || []).slice(0, 15).reverse();
+    if (items.length === 0) {
+      container.innerHTML = `<p class="text-muted">No response time history points available yet.</p>`;
+      return;
+    }
+
+    const maxVal = Math.max(...items.map(i => i.durationSec || 1), 5);
+    const svgW = 680;
+    const svgH = 140;
+    const padding = 30;
+
+    const points = items.map((item, idx) => {
+      const x = padding + (idx / Math.max(1, items.length - 1)) * (svgW - padding * 2);
+      const val = item.durationSec || 1;
+      const y = svgH - padding - (val / maxVal) * (svgH - padding * 2);
+      return { x, y, val, type: item.type, time: new Date(item.timestamp).toLocaleTimeString() };
+    });
+
+    const polylineStr = points.map(p => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ");
+
+    let svgHtml = `
+      <svg viewBox="0 0 ${svgW} ${svgH}" class="dev-svg-chart">
+        <line x1="${padding}" y1="${svgH - padding}" x2="${svgW - padding}" y2="${svgH - padding}" stroke="rgba(255,255,255,0.1)" stroke-width="1" />
+        <polyline fill="none" stroke="var(--accent-cyan)" stroke-width="2.5" stroke-linecap="round" points="${polylineStr}" />
+    `;
+
+    points.forEach(p => {
+      svgHtml += `
+        <circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="4.5" fill="var(--primary)" stroke="var(--accent-cyan)" stroke-width="2">
+          <title>${p.type.toUpperCase()}: ${p.val}s at ${p.time}</title>
+        </circle>
+      `;
+    });
+
+    svgHtml += `</svg>`;
+    container.innerHTML = svgHtml;
+  }
+
+  // Plot 2: Daily Token Usage Stacked Bar Chart
+  function renderTokenUsageChart(dailyStats) {
+    const container = document.getElementById("chart-token-usage");
+    if (!container) return;
+
+    const dates = Object.keys(dailyStats || {}).sort().slice(-7);
+    if (dates.length === 0) {
+      container.innerHTML = `<p class="text-muted">No 24h UTC token data available yet.</p>`;
+      return;
+    }
+
+    const svgW = 680;
+    const svgH = 150;
+    const pad = 35;
+    const maxTokens = Math.max(...dates.map(d => dailyStats[d].totalTokens || 100), 500);
+
+    const barW = Math.min(45, (svgW - pad * 2) / dates.length - 15);
+
+    let barsHtml = `<svg viewBox="0 0 ${svgW} ${svgH}" class="dev-svg-chart">
+      <line x1="${pad}" y1="${svgH - pad}" x2="${svgW - pad}" y2="${svgH - pad}" stroke="rgba(255,255,255,0.1)" stroke-width="1" />
+    `;
+
+    dates.forEach((d, idx) => {
+      const day = dailyStats[d];
+      const inT = day.totalInputTokens || 0;
+      const outT = day.totalOutputTokens || 0;
+      const tot = day.totalTokens || (inT + outT);
+
+      const x = pad + idx * ((svgW - pad * 2) / dates.length) + 15;
+      const totH = (tot / maxTokens) * (svgH - pad * 2);
+      const inH = (inT / tot) * totH;
+      const outH = totH - inH;
+
+      const yTot = svgH - pad - totH;
+      const yOut = yTot + inH;
+
+      barsHtml += `
+        <rect x="${x}" y="${yTot}" width="${barW}" height="${inH}" fill="var(--primary)" rx="2">
+          <title>${d}: Prompt Tokens: ${inT.toLocaleString()}</title>
+        </rect>
+        <rect x="${x}" y="${yOut}" width="${barW}" height="${outH}" fill="var(--accent-cyan)" rx="2">
+          <title>${d}: Output Tokens: ${outT.toLocaleString()}</title>
+        </rect>
+        <text x="${x + barW / 2}" y="${svgH - 12}" fill="var(--text-muted)" font-size="10" text-anchor="middle">${d.slice(5)}</text>
+      `;
+    });
+
+    barsHtml += `</svg>`;
+    container.innerHTML = barsHtml;
+  }
+
+  // Plot 3: Deduplication Reduction & OCR Yield Bar Chart
+  function renderDedupReductionChart(lastRun, dailyStats) {
+    const container = document.getElementById("chart-dedup-reduction");
+    if (!container) return;
+
+    if (!lastRun || !lastRun.dedupStats) {
+      container.innerHTML = `<p class="text-muted">Run a transcription batch to view deduplication reduction telemetry.</p>`;
+      return;
+    }
+
+    const d = lastRun.dedupStats;
+    const rawChars = d.rawTextChars || 0;
+    const finalChars = d.finalTextChars || 0;
+    const redPct = d.reductionPct || 0;
+    const discarded = d.duplicatesDiscarded || 0;
+
+    container.innerHTML = `
+      <div class="dedup-comparison-box">
+        <div class="dcb-row">
+          <span class="dcb-label">Raw OCR Text Characters:</span>
+          <span class="dcb-val">${rawChars.toLocaleString()} chars</span>
+        </div>
+        <div class="dcb-row">
+          <span class="dcb-label">Cleaned &amp; Deduplicated Text:</span>
+          <span class="dcb-val text-brand-cyan">${finalChars.toLocaleString()} chars</span>
+        </div>
+        <div class="dcb-bar-wrapper">
+          <div class="dcb-bar-fill" style="width: ${Math.min(100, Math.max(5, 100 - redPct))}%;"></div>
+        </div>
+        <div class="dcb-footer">
+          <span>✂️ <b>${redPct}%</b> prompt text size reduction</span> &bull; 
+          <span>Discarded <b>${discarded}</b> duplicate screenshot${discarded === 1 ? '' : 's'}</span>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderBaselineBanner(containerEl, lastRun) {
+    if (!containerEl) return;
+    if (!lastRun) {
+      containerEl.classList.add("hidden");
+      return;
+    }
+    const stageSec = lastRun.stage2TotalDurationSec !== undefined ? lastRun.stage2TotalDurationSec : (lastRun.stage2TotalDurationMs / 1000).toFixed(1);
+    const geminiSec = lastRun.geminiDurationSec !== undefined ? lastRun.geminiDurationSec : (lastRun.geminiDurationMs / 1000).toFixed(1);
+    const calls = lastRun.callsCount || (lastRun.calls ? lastRun.calls.length : 0);
+    const tokens = (lastRun.totalTokens || 0).toLocaleString();
+    const redPct = lastRun.dedupStats ? lastRun.dedupStats.reductionPct : 0;
+    const hitPct = lastRun.ocrStats ? lastRun.ocrStats.hitRatePct : 100;
+
+    containerEl.className = "baseline-banner";
+    containerEl.innerHTML = `
+      <div class="bb-icon">⚡</div>
+      <div class="bb-content">
+        <span class="bb-title">Transcribe Baseline:</span>
+        <span class="bb-detail">Stage Total: <b>${stageSec}s</b> (Gemini API: <b>${geminiSec}s</b> &bull; <b>${calls}</b> call${calls === 1 ? '' : 's'} &bull; <b>${tokens}</b> tokens &bull; Dedup Red: <b>${redPct}%</b> &bull; OCR Hits: <b>${hitPct}%</b>)</span>
+      </div>
+    `;
+    containerEl.classList.remove("hidden");
   }
 
   function setupEventListeners() {
