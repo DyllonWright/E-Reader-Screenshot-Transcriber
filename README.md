@@ -1,31 +1,45 @@
 # E-Reader Screenshot Transcriber
 
-A Node.js pipeline for transcribing and archiving e-reader screenshots. Combines parallel local OCR, intelligent fuzzy text deduplication, full-screen illustration extraction, and AI-powered formatting — all wrapped in a beautiful one-click local web GUI.
+> *"The palest ink is better than the best memory."* — Chinese proverb
 
-## 📺 Video Guide
+A local pipeline that turns a pile of e-reader screenshots into a dated, searchable Markdown note. Tesseract reads the pixels on your own machine, fuzzy matching stitches overlapping pages back into continuous prose, full-screen illustrations get cropped and named from their surrounding context, and a single batched Gemini call cleans the day into something you would actually want to re-read. Everything lands in `output/YYYY-MM-DD.md` with Obsidian-style embeds, ready to drop straight into a vault.
 
-Watch the walkthrough: **[E-Reader Screenshot Transcriber — Usage Guide](https://youtu.be/qgqcT_7qKWU)**
+📺 **[Watch the usage guide](https://youtu.be/qgqcT_7qKWU)**
 
-## How It Works
+## Why this exists
 
-A single reading day flows through the pipeline in one pass. Note the two **batched** Gemini calls (highlighted) and the cache path that costs **zero** API calls on re-runs:
+Reading on a phone produces screenshots. A passage lands, you press the buttons, and the moment goes into the camera roll — hundreds of them, stacked like pressed flowers. The words inside stay locked in pixels: you cannot search them, quote them, link them, or fold them into anything you write later. The archive grows while the reading evaporates.
+
+The usual advice splits three ways. Export highlights from your bookstore — which works only when you bought the book there and read it in their app. Retype the passages by hand — which nobody sustains past week two. Or push the images through a generic cloud OCR — which charges per page, ships your reading list to a stranger, and hands back a wall of noise: page numbers, battery icons, clock times, and the same paragraph three times over.
+
+That last complaint deserves attention, because it explains why raw OCR alone never finished the job. **Screenshots overlap.** Scroll a little, capture again, and the top of the new image repeats the tail of the old one. An honest transcription has to find that seam and sew it, not staple the pages together and call it a day.
+
+So this tool does the whole job locally first and reaches for the network last. A worker pool sized to your CPU runs Tesseract across every screenshot and caches each result, so re-runs cost nothing. A pixel check on the reader's header band sorts text pages from illustrations — which means a near-empty chapter opener classifies correctly instead of passing for a picture. Fuzzy Levenshtein matching locates the overlap between consecutive pages and merges them. Illustrations get cropped to their bounding box. Only then does Gemini see anything, and only twice: one batched call names every illustration, one cleans the day's text. A typical reading day spends **one or two API calls** total.
+
+Your books stay yours, your reading list stays on your machine, and the day comes out as a note you can actually use.
+
+Nothing else did this, so this had to exist. Now it does, and you can have it for free.
+
+## How it works
+
+One reading day flows through in a single pass. The two Gemini calls appear in cyan; the cache path in green costs nothing at all:
 
 ```mermaid
 flowchart TD
-    A([Import screenshots via GUI]) --> B[Parallel Tesseract OCR<br/>workers scale to CPU cores]
-    B --> C{OCR cache hit?}
-    C -->|Yes| D[Reuse cached text and classification<br/>zero API calls]
-    C -->|No| E[Run OCR then cache result]
-    D --> F{Header-color<br/>page classification}
+    A(["Import screenshots via the GUI"]) --> B["Parallel Tesseract OCR<br/>worker pool sized to CPU cores"]
+    B --> C{"OCR cache hit?"}
+    C -->|yes| D["Reuse cached text + classification<br/>zero API calls, near-instant"]
+    C -->|no| E["Read once, then cache<br/>text · isTextPage · mtime"]
+    D --> F{"Header-color band:<br/>text page or illustration?"}
     E --> F
-    F -->|Text page| G[Fuzzy overlap dedup<br/>Levenshtein trim and merge]
-    F -->|Illustration| H[Auto-crop to bounding box]
-    H --> I[[Gemini batch call<br/>name all illustrations at once]]
-    G --> J[[Gemini batch call<br/>clean and format text<br/>up to 50 pages per call]]
-    I --> K[Review and Rename grid]
+    F -->|"text page"| G["Fuzzy overlap dedup<br/>Levenshtein seam-finding · trim · merge"]
+    F -->|"illustration"| H["Auto-crop to bounding box<br/>corner-sampled background"]
+    H --> I[["Gemini call 1<br/>name every illustration at once,<br/>using surrounding text as context"]]
+    G --> J[["Gemini call 2<br/>clean and format the prose<br/>up to 50 pages per call"]]
+    I --> K["Review + rename grid<br/>edit any filename before writing"]
     J --> K
-    K --> L[Finalize<br/>sequential chronological crop writes]
-    L --> M([Daily Markdown output<br/>YYYY-MM-DD.md with Obsidian embeds])
+    K --> L["Finalize:<br/>sequential chronological crop writes"]
+    L --> M(["output/YYYY-MM-DD.md<br/>timestamped text + Obsidian embeds"])
 
     classDef gemini fill:#0891b2,stroke:#164e63,color:#fff;
     classDef cache fill:#065f46,stroke:#022c22,color:#fff;
@@ -33,109 +47,67 @@ flowchart TD
     class D cache;
 ```
 
-## Capabilities
+Two details carry most of the weight. The **classifier** keys on a UI band that appears on every reading page rather than on word count, so sparse pages — chapter starts, pull quotes, tables of contents — never get misfiled as artwork. The **deduplicator** slides an anchor window from the tail of one page against the head of the next and scores it with a pure-JavaScript edit-distance ratio, so a mid-scroll double-capture collapses into one continuous passage.
 
-*   **Local Web GUI:** A glassmorphic browser-based interface. Launch it by double-clicking `run.bat`. No installation steps needed — it self-bootstraps all dependencies on first run.
-*   **Screenshot Import:** Import screenshots directly from your Downloads folder or any directory using the browser's native file picker. Files are uploaded to `screenshots/` and OCR-cached automatically in the background.
-*   **Parallel Worker Pool OCR:** A dynamic pool of Tesseract.js workers (scaled to CPU core count) runs local OCR concurrently on all screenshots.
-*   **OCR Caching:** Stores OCR text **and** the page classification (`isTextPage`) per image. Subsequent runs reuse the cache for unchanged screenshots, making re-runs essentially instant.
-*   **Header-Color Screen Classification:** Reads the reader header's blue (`#3f4863`) and green (`#3c5e51`) bands straight from the pixels to distinguish **text pages** from **full-screen illustration screenshots**. Because it keys on a UI band present on every reading page — not on OCR words — even a near-empty page (chapter start, quote, table of contents) classifies as text instead of falling through to "illustration."
-*   **Fuzzy Overlap Deduplication:** Slides an anchor window from the tail of the previous screenshot and fuzzy-matches it against the head of the next, using a pure-JavaScript Levenshtein edit distance ratio (`fuzzRatio`). Overlapping and duplicate pages are automatically trimmed and merged into a continuous, clean transcription.
-*   **Illustration Extraction & Cropping:** Full-screen illustration screenshots are detected, background-sampled at corners, and automatically cropped to their bounding box. The crop ignores the top/bottom 8% (where UI overlays appear).
-*   **Contextual AI Naming:** All detected illustrations are bundled into a **single Gemini API call**, providing each illustration's surrounding text context and any user-supplied hints. Gemini returns descriptive, Windows-safe filenames like `YYYY MM DD Book Title Description.jpg`.
-*   **Interactive Name Review:** Before saving anything, a visual review grid displays each cropped illustration thumbnail alongside its AI-suggested filename in an editable 2-line text area. Rename them directly before finalizing.
-*   **Sequential Chronological Writes:** Crop files are written with 100ms spacing between each, guaranteeing that Windows file creation timestamps match the chronological order of the original screenshots.
-*   **Obsidian-Compatible Output:** Illustrations are embedded in the daily Markdown file using Obsidian's `![[filename.jpg]]` syntax, woven chronologically among the timestamped text entries.
-*   **Persistent Settings:** Book title and illustration context hints are saved to `meta.json` and automatically reloaded between sessions. The API key can be pasted and saved directly in the GUI, overwriting `.env`.
-*   **API Resilience:** Automatic exponential backoff retries on transient Gemini API errors (429 rate limit, 503 overload).
-*   **One-Click Explorer Access:** A "Show in System Explorer" button on the success screen instantly opens the `output/` folder in Windows File Explorer.
+## A day in the life
 
-## Tools & Dependencies
+You read forty minutes before bed, screenshotting whatever lands. Two of those captures overlap, and one holds a full-page diagram:
 
-| Package | Role |
-|---|---|
-| `express` | Local web server for the GUI backend |
-| `tesseract.js` | Local OCR engine (multi-worker scheduler) |
-| `jimp` | Pure-JS image loading and bounding box cropping |
-| `@google/generative-ai` | Gemini API client (`gemini-flash-latest`) |
-| `dotenv` | Loads `GEMINI_API_KEY` from `.env` |
-
-## Project Layout
-
+```mermaid
+flowchart LR
+    subgraph cap["Tonight's camera roll"]
+        S1["3 text screenshots<br/>(two of them overlap)"]
+        S2["1 full-page diagram"]
+    end
+    S1 --> P["Dedup finds the seam<br/>3 captures → 2 clean passages"]
+    S2 --> Q["Cropped, then named from<br/>the paragraphs around it"]
+    P --> N(["One dated note,<br/>continuous prose,<br/>diagram embedded in place"])
+    Q --> N
 ```
-E-Reader-Screenshot-Transcriptions/
-│
-├── gui/                          ← Local web GUI (Express backend + HTML/CSS/JS frontend)
-│   ├── server.js                 ← Express server: API endpoints, OCR orchestration, Gemini calls, SSE streaming
-│   └── public/
-│       ├── index.html            ← Multi-step stepper UI (Config → Processing → Review → Success)
-│       ├── style.css             ← Glassmorphic dark theme, Vanilla CSS
-│       └── app.js                ← Frontend state management, file upload, SSE log listener, review grid
-│
-├── screenshots/                  ← Drop raw phone screenshots here (Screenshot_YYYYMMDD_HHMMSS_*.jpg/png)
-├── output/                       ← Daily .md files + date-named Extracted Images subdirectories
-│   ├── YYYY-MM-DD.md             ← Formatted daily Markdown with Obsidian image embeds
-│   └── YYYY-MM-DD Extracted Images/
-│       └── YYYY MM DD Book Title Description.jpg
-│
-├── .ocr_cache/                   ← JSON-cached OCR results keyed to file mtime (auto-managed)
-├── meta.json                     ← Persistent GUI state: book title, illustration context hints (auto-managed)
-├── .env                          ← Holds GEMINI_API_KEY (git-ignored)
-├── processScreenshots.js         ← Legacy CLI entrypoint (same pipeline logic, no GUI)
-├── run.bat                       ← One-click launcher: installs deps if needed, starts GUI server, opens browser
-├── package.json
-└── eng.traineddata               ← Bundled Tesseract English language model
-```
+
+The diagram arrives as `2026 05 29 My Book Title Chapter Map.jpg`, embedded exactly where it fell in the reading — not appended to the bottom as an orphan.
 
 ## Setup
 
 ### Prerequisites
 
-*   Node.js (LTS recommended) — download from [nodejs.org](https://nodejs.org/)
-*   A Google Gemini API key from [Google AI Studio](https://aistudio.google.com/)
+- Node.js (LTS recommended) — from [nodejs.org](https://nodejs.org/)
+- A Google Gemini API key — from [Google AI Studio](https://aistudio.google.com/)
 
 ### Installation
 
-1.  Clone the repository:
-    ```bash
-    git clone https://github.com/DyllonWright/E-Reader-Screenshot-Transcriber
-    cd E-Reader-Screenshot-Transcriber
-    ```
+```mermaid
+flowchart LR
+    A["1 · Clone the repo"] --> B["2 · Add GEMINI_API_KEY<br/>to .env (or paste it in the GUI)"]
+    B --> C["3 · Double-click run.bat"]
+    C --> D(["Dependencies self-install,<br/>the GUI opens in your browser"])
+```
 
-2.  Create `.env` in the project root with your API key:
-    ```
-    GEMINI_API_KEY=YOUR_KEY_HERE
-    ```
-    *(You can also paste and save the key directly inside the GUI on first launch.)*
+1. **Clone it:**
+   ```bash
+   git clone https://github.com/DyllonWright/E-Reader-Screenshot-Transcriber
+   cd E-Reader-Screenshot-Transcriber
+   ```
 
-3.  Double-click `run.bat`. It will auto-install all Node.js dependencies on first run, then open the GUI in your browser.
+2. **Add your key** — create `.env` in the project root:
+   ```
+   GEMINI_API_KEY=YOUR_KEY_HERE
+   ```
+   You can skip this and paste the key straight into the GUI on first launch instead; it writes `.env` for you.
 
-## GUI Workflow
+3. **Double-click `run.bat`.** It installs dependencies on first run, starts the server, and opens the interface. No build step, no global installs.
 
-The GUI walks you through a 4-step pipeline:
+## The four steps
 
-**Step 1 — Configure & Import**
-- Set the current book title (saved to `meta.json` for future sessions).
-- Paste a new Gemini API key to update `.env` on-the-fly.
-- Click **Load Screenshots** to multiselect image files from your phone or Downloads folder. They are copied to `screenshots/` and OCR-cached instantly.
-- Select the date batch to process from the dropdown.
-- Optionally type context hints next to detected illustration thumbnails (e.g., *"world map"* or *"chapter opener"*) to help Gemini name them precisely.
-- Press **Run AI Transcription & Extractor**.
+**1 — Configure & import.** Set the current book title (it persists to `meta.json` and pre-fills every later session). Load screenshots through the native file picker; they copy into `screenshots/` and start OCR-caching in the background immediately. Pick the date batch to process. Optionally type a hint beside any detected illustration — *"world map"*, *"chapter opener"* — to sharpen how Gemini names it.
 
-**Step 2 — AI Processing**
-- Watch the live retro-terminal console stream OCR reads, deduplication decisions, Gemini illustration naming (single bundled call), and Gemini text cleanup batches in real time.
+**2 — AI processing.** A live terminal streams every OCR read, each dedup decision, and both Gemini calls as they happen.
 
-**Step 3 — Review & Rename**
-- Inspect each cropped illustration alongside its AI-suggested filename.
-- Edit the filename in the 2-line text area directly before saving.
-- Press **Finalize Notes & Save Sequential Crops**.
+**3 — Review & rename.** Each cropped illustration appears beside its suggested filename in an editable field. Fix anything you dislike before a single file gets written.
 
-**Step 4 — Complete**
-- Crops are written to `output/YYYY-MM-DD Extracted Images/` in chronological order.
-- The daily Markdown note is written to `output/YYYY-MM-DD.md`.
-- Press **Show in System Explorer** to jump straight to the output folder.
+**4 — Complete.** Crops write to `output/YYYY-MM-DD Extracted Images/` spaced 100 ms apart, which keeps Windows creation timestamps in true chronological order. The daily note writes to `output/YYYY-MM-DD.md`. One button opens the folder.
 
-## Output Format
+## Output format
 
 ```markdown
 # Reading – [[2026-05-29]]
@@ -150,20 +122,69 @@ This is the first passage of cleaned-up text, with paragraphs joined into a sing
 This passage continues after the illustration entry above.
 ```
 
-## CLI Mode (Legacy)
+Timestamps come from the screenshot filenames, so the note reads back in the order you actually read it.
 
-The original headless script still works and uses the same core pipeline:
+## API quota notes
+
+This tool calls `gemini-flash-latest`, which carries a free daily request cap. The pipeline treats that cap as a real constraint:
+
+| Stage | Cost |
+|---|---|
+| Illustration naming | **1 call**, no matter how many illustrations |
+| Text transcription | **1 call** per 50 OCR pages — a typical day needs one |
+| Re-running a processed day | **0 calls** — the OCR cache absorbs it |
+
+Google trimmed free-tier limits considerably at the end of 2025, and the exact ceiling varies per project, so treat your [AI Studio rate-limit page](https://aistudio.google.com/rate-limit) as the authority. The **Dev Stats** panel tracks calls, response times, and token counts per 24-hour UTC window against a daily target you set yourself.
+
+Retries use exponential backoff on transient errors (429 rate limit, 503 overload) and count once, not once per attempt.
+
+## CLI mode (legacy)
+
+The original headless script still runs the same core pipeline:
 
 ```powershell
 node processScreenshots.js
 ```
 
-Place screenshots in `screenshots/`, run the command, and formatted output is written to `output/`. No GUI required. Useful for automation or batch runs.
+Drop screenshots in `screenshots/`, run it, collect Markdown from `output/`. Handy for automation and unattended batches.
 
-## API Quota Notes
+## Project layout
 
-This tool uses `gemini-flash-latest` which has a free daily call limit. The pipeline is designed to be quota-efficient:
+```
+E-Reader-Screenshot-Transcriber/
+│
+├── gui/                          ← Local web GUI (Express + vanilla frontend)
+│   ├── server.js                 ← API endpoints, OCR orchestration, Gemini calls, SSE streaming
+│   └── public/
+│       ├── index.html            ← Four-step stepper interface
+│       ├── style.css             ← Glassmorphic dark theme over an animated cosmic canvas
+│       └── app.js                ← State, uploads, live log listener, review grid
+│
+├── screenshots/                  ← Drop raw captures here (Screenshot_YYYYMMDD_HHMMSS_*.jpg/png)
+├── output/                       ← Daily notes + per-date image folders
+│   ├── YYYY-MM-DD.md
+│   └── YYYY-MM-DD Extracted Images/
+│
+├── .ocr_cache/                   ← Per-image OCR + classification cache (auto-managed)
+├── .pipeline_cache/              ← Per-date pipeline state, allows resuming (git-ignored)
+├── meta.json                     ← Book title, recent books, illustration hints (git-ignored)
+├── gemini_stats.json             ← API timing/token log by UTC window (git-ignored)
+├── .env                          ← GEMINI_API_KEY (git-ignored)
+├── processScreenshots.js         ← Legacy CLI entrypoint
+├── run.bat                       ← One-click launcher
+└── eng.traineddata               ← Bundled Tesseract English model
+```
 
-- **Illustration naming**: All illustrations per day are bundled into **1 API call** (regardless of count).
-- **Text transcription**: Up to 50 OCR pages are bundled per call. A typical reading day uses **1–2 calls** total.
-- **OCR caching**: Re-runs on already-processed screenshots consume **zero additional API calls**.
+`.ocr_cache/` and `.pipeline_cache/` rebuild themselves on demand, so deleting them costs only time.
+
+## Built with
+
+| Package | Role |
+|---|---|
+| `express` | Local server behind the GUI |
+| `tesseract.js` | On-device OCR, multi-worker scheduler |
+| `jimp` | Pure-JS image loading and bounding-box cropping |
+| `@google/generative-ai` | Gemini client (`gemini-flash-latest`) |
+| `dotenv` | Reads `GEMINI_API_KEY` from `.env` |
+
+Further architecture notes live in [ARCHITECTURE.md](ARCHITECTURE.md).
