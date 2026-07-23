@@ -6,6 +6,33 @@ A Node.js pipeline for transcribing and archiving e-reader screenshots. Combines
 
 Watch the walkthrough: **[E-Reader Screenshot Transcriber — Usage Guide](https://youtu.be/qgqcT_7qKWU)**
 
+## How It Works
+
+A single reading day flows through the pipeline in one pass. Note the two **batched** Gemini calls (highlighted) and the cache path that costs **zero** API calls on re-runs:
+
+```mermaid
+flowchart TD
+    A([Import screenshots via GUI]) --> B[Parallel Tesseract OCR<br/>workers scale to CPU cores]
+    B --> C{OCR cache hit?}
+    C -->|Yes| D[Reuse cached text and classification<br/>zero API calls]
+    C -->|No| E[Run OCR then cache result]
+    D --> F{Header-color<br/>page classification}
+    E --> F
+    F -->|Text page| G[Fuzzy overlap dedup<br/>Levenshtein trim and merge]
+    F -->|Illustration| H[Auto-crop to bounding box]
+    H --> I[[Gemini batch call<br/>name all illustrations at once]]
+    G --> J[[Gemini batch call<br/>clean and format text<br/>up to 50 pages per call]]
+    I --> K[Review and Rename grid]
+    J --> K
+    K --> L[Finalize<br/>sequential chronological crop writes]
+    L --> M([Daily Markdown output<br/>YYYY-MM-DD.md with Obsidian embeds])
+
+    classDef gemini fill:#0891b2,stroke:#164e63,color:#fff;
+    classDef cache fill:#065f46,stroke:#022c22,color:#fff;
+    class I,J gemini;
+    class D cache;
+```
+
 ## Capabilities
 
 *   **Local Web GUI:** A glassmorphic browser-based interface. Launch it by double-clicking `run.bat`. No installation steps needed — it self-bootstraps all dependencies on first run.
