@@ -1,20 +1,37 @@
 // processScreenshots.js
 require("dotenv").config();
 
-if (!process.env.GEMINI_API_KEY) {
-  console.error("Error: GEMINI_API_KEY not found in .env file. Please create a .env file in the project root with GEMINI_API_KEY=YOUR_API_KEY.");
-  process.exit(1);
-}
-
 const fs = require("fs");
 const path = require("path");
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 const Tesseract = require("tesseract.js");
 const os = require("os");
 const { Jimp } = require("jimp");
+const { KeyRing, fingerprint, defaultRingPath, scrubSecrets } = require("./gui/lib/keyRing");
+const geminiRetry = require("./gui/lib/geminiRetry");
+const { Pace } = require("./gui/lib/geminiPace");
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const model = genAI.getGenerativeModel({ model: "gemini-flash-latest" });
+// The same three modules the GUI runs on. A policy spelled twice drifts, and
+// this repo has the receipts: the 30-second back-off they replace lived here
+// AND in `gui/server.js`, identical and identically wrong.
+const MODEL_NAME = "gemini-flash-latest";
+const keys = new KeyRing({
+  filePath: defaultRingPath(path.join(__dirname, ".env")),
+  log: (message) => console.log(`  🔑 ${message}`),
+});
+const pace = new Pace();
+const deadKeys = new Set();
+
+if (!keys.size() && !process.env.GEMINI_API_KEY) {
+  console.error("Error: no GEMINI_API_KEY found. Create a .env in the project root with GEMINI_API_KEY=YOUR_API_KEY.");
+  process.exit(1);
+}
+if (keys.size() > 1) {
+  console.log(`  🔑 Key ring: ${keys.size()} keys, starting on "${(keys.active() || {}).label}".`);
+}
+
+const buildModel = (key) =>
+  new GoogleGenerativeAI(key).getGenerativeModel({ model: MODEL_NAME });
 
 // Parse filenames like: Screenshot_20251202_190647_Evie.jpg
 function parseDateTimeFromFilename(filename) {
@@ -191,6 +208,7 @@ function recordGeminiCallCLI(callDetail) {
       stats.dailyStats[utcDate] = {
         utcDate,
         totalCalls: 0,
+        totalRequests: 0,
         totalDurationMs: 0,
         avgDurationMs: 0,
         totalInputTokens: 0,
@@ -202,6 +220,8 @@ function recordGeminiCallCLI(callDetail) {
     }
     const day = stats.dailyStats[utcDate];
     day.totalCalls += 1;
+    // Google counts REQUESTS; one call that fought through a 503 sends several.
+    day.totalRequests = (day.totalRequests || 0) + (callDetail.requests || 1);
     day.totalDurationMs += callDetail.durationMs;
     day.avgDurationMs = Math.round(day.totalDurationMs / day.totalCalls);
     day.totalInputTokens += callDetail.inputTokens;
@@ -224,68 +244,125 @@ function recordGeminiCallCLI(callDetail) {
   }
 }
 
-// Wrapper to handle Gemini API transient errors (e.g. 503 Service Unavailable, 429 Rate Limit Exceeded)
-async function generateContentWithRetry(prompt, maxRetries = 5, initialDelayMs = 2000, meta = {}) {
-  let attempt = 0;
+/**
+ * Send one prompt, waiting out a busy server and rotating off a dry key.
+ *
+ * The CLI twin of `generateContentWithRetry` in `gui/server.js`, sharing the
+ * same three modules under `gui/lib/` so the policy lives in one place. It
+ * replaces a loop that retried five times on `2000 * 2**attempt` — 2s, 4s, 8s,
+ * 16s, thirty seconds of patience — and that ran 503 and 429 through one branch
+ * on one budget, though the two want opposite moves.
+ */
+async function generateContentWithRetry(prompt, meta = {}) {
+  let activeKey = keys.key() || process.env.GEMINI_API_KEY || "";
+  let model = buildModel(activeKey);
+  const patience = new geminiRetry.Patience(Math.max(1, keys.size()));
   const startTime = Date.now();
-  const modelName = "gemini-flash-latest";
+
   while (true) {
-    try {
-      const result = await model.generateContent(prompt);
-      const durationMs = Date.now() - startTime;
-      const durationSec = parseFloat((durationMs / 1000).toFixed(2));
-      
-      const responseText = result.response ? result.response.text() : "";
-      const usage = (result.response && result.response.usageMetadata) || {};
-      const inputTokens = usage.promptTokenCount !== undefined ? usage.promptTokenCount : Math.ceil(prompt.length / 4);
-      const outputTokens = usage.candidatesTokenCount !== undefined ? usage.candidatesTokenCount : Math.ceil(responseText.length / 4);
-      const totalTokens = usage.totalTokenCount !== undefined ? usage.totalTokenCount : (inputTokens + outputTokens);
-
-      recordGeminiCallCLI({
-        type: meta.type || "general",
-        model: modelName,
-        durationMs,
-        durationSec,
-        inputTokens,
-        outputTokens,
-        totalTokens,
-        timestamp: new Date().toISOString(),
-        itemCount: meta.itemCount || 1,
-        status: "success",
-        attempts: attempt + 1
-      });
-
-      return result;
-    } catch (error) {
-      attempt++;
-      if (attempt >= maxRetries) {
-        const durationMs = Date.now() - startTime;
-        recordGeminiCallCLI({
-          type: meta.type || "general",
-          model: modelName,
-          durationMs,
-          durationSec: parseFloat((durationMs / 1000).toFixed(2)),
-          inputTokens: Math.ceil(prompt.length / 4),
-          outputTokens: 0,
-          totalTokens: Math.ceil(prompt.length / 4),
-          timestamp: new Date().toISOString(),
-          itemCount: meta.itemCount || 1,
-          status: "error",
-          error: error.message,
-          attempts: attempt
-        });
-        throw error;
-      }
-      const isTransient = error.status === 503 || error.status === 429 || 
-                          (error.message && (error.message.includes("503") || error.message.includes("429") || error.message.includes("high demand") || error.message.includes("overloaded")));
-      if (isTransient) {
-        const delay = initialDelayMs * Math.pow(2, attempt - 1);
-        console.warn(`    ⚠️ Gemini API request failed (${error.status || 'Transient Error'}). Retrying attempt ${attempt}/${maxRetries} in ${delay}ms...`);
-        await new Promise(resolve => setTimeout(resolve, delay));
-      } else {
-        throw error;
+    // Rotate ahead of the ceiling, then hold the rate window. Both happen
+    // outside the recorded duration: the wait belongs to us, not to the model.
+    const keyId = fingerprint(activeKey);
+    if (pace.dueForRotation(keyId)) {
+      const spentOnKey = pace.spent(keyId);
+      const next = keys.rotate({ exhausted: activeKey, skip: Array.from(deadKeys) });
+      if (next) {
+        pace.clearKey(keyId);
+        activeKey = next.key;
+        model = buildModel(activeKey);
+        console.log(`  🔑 Rotated ahead of the ceiling — ${spentOnKey} calls on the last key.`);
       }
     }
+    await pace.reserve(fingerprint(activeKey), (owed) => {
+      if (owed > 500) console.log(`  ⏳ Holding ${Math.round(owed / 1000)}s for the rate window.`);
+    });
+    patience.sent();
+
+    let result = null;
+    let responseText = "";
+    let usage = {};
+    let apiError = null;
+    try {
+      result = await model.generateContent(prompt);
+      responseText = result.response ? result.response.text() : "";
+      usage = (result.response && result.response.usageMetadata) || {};
+    } catch (error) {
+      apiError = error;
+    }
+
+    if (apiError) {
+      let move = patience.consider(apiError);
+
+      if (move === geminiRetry.Patience.ROTATE) {
+        if (KeyRing.isDeadKeyError(apiError)) {
+          console.warn(`  🚫 Key ${fingerprint(activeKey)} refused this call — skipping it for this run.`);
+          deadKeys.add(activeKey);
+        }
+        const next = keys.rotate({ exhausted: activeKey, skip: Array.from(deadKeys) });
+        if (next) {
+          activeKey = next.key;
+          model = buildModel(activeKey);
+          // No pace count gets cleared here — see the note in gui/server.js.
+          // Clearing after the reassignment wiped the NEW key's budget.
+          patience.rotated();
+          continue;                     // retry at once, spending no transient try
+        }
+        move = geminiRetry.Patience.STOP;
+      }
+
+      if (move === geminiRetry.Patience.WAIT && patience.afford(apiError)) {
+        console.warn(`  ⏳ ${patience.waitingLine(apiError)}`);
+        await patience.rest();
+        continue;
+      }
+
+      const durationMs = Date.now() - startTime;
+      console.error(`  ❌ ${patience.closingLine(apiError)}`);
+      recordGeminiCallCLI({
+        type: meta.type || "general",
+        model: MODEL_NAME,
+        durationMs,
+        durationSec: parseFloat((durationMs / 1000).toFixed(2)),
+        inputTokens: Math.ceil(prompt.length / 4),
+        outputTokens: 0,
+        totalTokens: Math.ceil(prompt.length / 4),
+        timestamp: new Date().toISOString(),
+        itemCount: meta.itemCount || 1,
+        status: "error",
+        error: scrubSecrets(apiError.message),
+        httpStatus: geminiRetry.statusOf(apiError) || null,
+        attempts: patience.transient + 1,
+        requests: patience.requests,
+        rotations: patience.rotations,
+        keyFingerprint: fingerprint(activeKey),
+      });
+      throw apiError;
+    }
+
+    const durationMs = Date.now() - startTime;
+    const inputTokens = usage.promptTokenCount !== undefined ? usage.promptTokenCount : Math.ceil(prompt.length / 4);
+    const outputTokens = usage.candidatesTokenCount !== undefined ? usage.candidatesTokenCount : Math.ceil(responseText.length / 4);
+    const totalTokens = usage.totalTokenCount !== undefined ? usage.totalTokenCount : (inputTokens + outputTokens);
+
+    recordGeminiCallCLI({
+      type: meta.type || "general",
+      model: MODEL_NAME,
+      durationMs,
+      durationSec: parseFloat((durationMs / 1000).toFixed(2)),
+      inputTokens,
+      outputTokens,
+      totalTokens,
+      timestamp: new Date().toISOString(),
+      itemCount: meta.itemCount || 1,
+      status: "success",
+      attempts: patience.transient + 1,
+      // What Google's meter counted, as against what the GUI shows a person.
+      requests: patience.requests,
+      rotations: patience.rotations,
+      keyFingerprint: fingerprint(activeKey),
+    });
+
+    return result;
   }
 }
 

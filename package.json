@@ -4,7 +4,8 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node gui/server.js",
+    "test": "node gui/lib/__tests__/keyRing.test.js && node gui/lib/__tests__/retryLoop.test.js"
   },
   "keywords": [],
   "author": "",

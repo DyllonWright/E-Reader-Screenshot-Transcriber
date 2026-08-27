@@ -95,6 +95,17 @@ flowchart LR
    ```
    You can skip this and paste the key straight into the GUI on first launch instead; it writes `.env` for you.
 
+   **Several keys?** Label them and comment out the spares. That layout *is* the
+   state — on a quota error the pipeline comments the dry key out, uncomments
+   the next, and rewrites the file, so tomorrow's run starts on a key that still
+   has room:
+   ```dotenv
+   # Everyday account
+   GEMINI_API_KEY=AIza...
+   # Spare account
+   #GEMINI_API_KEY=AIza...
+   ```
+
 3. **Double-click `run.bat`.** It installs dependencies on first run, starts the server, and opens the interface. No build step, no global installs.
 
 ## The four steps
@@ -136,7 +147,20 @@ This tool calls `gemini-flash-latest`, which carries a free daily request cap. T
 
 Google trimmed free-tier limits considerably at the end of 2025, and the exact ceiling varies per project, so treat your [AI Studio rate-limit page](https://aistudio.google.com/rate-limit) as the authority. The **Dev Stats** panel tracks calls, response times, and token counts per 24-hour UTC window against a daily target you set yourself.
 
-Retries use exponential backoff on transient errors (429 rate limit, 503 overload) and count once, not once per attempt.
+Transient errors and quota errors get told apart, because they want opposite
+moves. A **503 overload** clears if you wait, so the pipeline waits — jittered
+back-offs of 15s, 30s, 60s, then two-minute holds, up to ten minutes, showing a
+countdown the whole way. A **429** on a free key never clears by waiting, so it
+rotates to the next key in `.env` and retries at once. A revoked key gets
+stepped over for the rest of the run, and a malformed request stops immediately
+instead of spending ten minutes proving itself wrong.
+
+Finished transcription batches bank to `.pipeline_cache/` as they land, so a
+failure part-way through a long day resumes instead of paying for the completed
+batches again.
+
+The Dev Stats panel counts **requests**, not calls: one call that fought through
+a spike sends several, and the gauge shows both (`4 calls, +4 retried`).
 
 ## CLI mode (legacy)
 
@@ -169,7 +193,7 @@ E-Reader-Screenshot-Transcriber/
 ├── .pipeline_cache/              ← Per-date pipeline state, allows resuming (git-ignored)
 ├── meta.json                     ← Book title, recent books, illustration hints (git-ignored)
 ├── gemini_stats.json             ← API timing/token log by UTC window (git-ignored)
-├── .env                          ← GEMINI_API_KEY (git-ignored)
+├── .env                          ← the GEMINI_API_KEY ring (git-ignored, with .env.bak/.env.tmp)
 ├── processScreenshots.js         ← Legacy CLI entrypoint
 ├── run.bat                       ← One-click launcher
 └── eng.traineddata               ← Bundled Tesseract English model

@@ -702,7 +702,12 @@ document.addEventListener("DOMContentLoaded", () => {
       renderRecentBooks();
       renderArchivedSection();
       if (data.apiKeyPresent) {
-        keyStatusText.textContent = `Active Key: ${data.apiKeyMasked}`;
+        // The ring, by label and fingerprint. `apiKeyMasked` used to carry ten
+        // real characters of the key; it now carries none.
+        const ring = Array.isArray(data.keyRing) ? data.keyRing : [];
+        keyStatusText.textContent = ring.length > 1
+          ? `Active Key: ${data.apiKeyMasked}  ·  ${ring.length} in ring (${ring.filter(k => !k.active).map(k => k.label).join(", ")} on deck)`
+          : `Active Key: ${data.apiKeyMasked}`;
         keyStatusText.classList.remove("text-muted");
         keyStatusText.classList.add("text-brand-cyan");
       } else {
@@ -1990,7 +1995,7 @@ document.addEventListener("DOMContentLoaded", () => {
       card.innerHTML = `
         <div class="utc-window-header">
           <span class="utc-window-date">🌐 ${utcDate} (24h UTC Window)</span>
-          <span class="utc-window-calls">${day.totalCalls} API Call${day.totalCalls === 1 ? '' : 's'}</span>
+          <span class="utc-window-calls">${day.totalCalls} API Call${day.totalCalls === 1 ? '' : 's'}${(day.totalRequests || day.totalCalls) > day.totalCalls ? ` · ${day.totalRequests} requests` : ''}</span>
         </div>
         <div class="utc-window-metrics">
           <div class="utc-m-item">
@@ -2057,9 +2062,15 @@ document.addEventListener("DOMContentLoaded", () => {
 
     const utcToday = new Date().toISOString().split("T")[0];
     const todayData = (dailyStats && dailyStats[utcToday]) || {};
+    // REQUESTS, not calls. A call that fought through a 503 sends several, and
+    // Google's meter counts each one — reading the call count here is what let
+    // a 40%-full day show as 20%. Older days in the file carry no request
+    // count, so they fall back to what they do have.
     const callsToday = todayData.totalCalls || 0;
+    const requestsToday = todayData.totalRequests !== undefined ? todayData.totalRequests : callsToday;
     const limit = targetLimit || appState.dailyQuotaTarget || 50;
-    const pct = Math.min(100, parseFloat(((callsToday / limit) * 100).toFixed(1)));
+    const pct = Math.min(100, parseFloat(((requestsToday / limit) * 100).toFixed(1)));
+    const retried = requestsToday - callsToday;
     const ocrHitPct = lastRun && lastRun.ocrStats ? lastRun.ocrStats.hitRatePct : 100;
     const dedupRed = lastRun && lastRun.dedupStats ? lastRun.dedupStats.reductionPct : 0;
     const words = lastRun && lastRun.yieldStats ? lastRun.yieldStats.totalWords : 0;
@@ -2079,7 +2090,8 @@ document.addEventListener("DOMContentLoaded", () => {
           </div>
         </div>
         <div class="qm-count-row">
-          <span class="qm-badge-large">${callsToday} / ${limit.toLocaleString()} pings today (${pct}%)</span>
+          <span class="qm-badge-large">${requestsToday} / ${limit.toLocaleString()} pings today (${pct}%)</span>
+          ${retried > 0 ? `<span class="qm-badge-large" title="Requests the retry loop sent beyond the first attempt of each call — these count against the quota too.">${callsToday} call${callsToday === 1 ? '' : 's'}, +${retried} retried</span>` : ''}
         </div>
         <div class="progress-bar-bg" style="height: 10px; margin-bottom: 14px;">
           <div class="progress-bar-fill ${pct > 80 ? 'bg-danger' : ''}" style="width: ${Math.max(2, pct)}%;"></div>

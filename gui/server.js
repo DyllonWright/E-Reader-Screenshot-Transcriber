@@ -7,6 +7,9 @@ const os = require("os");
 const Tesseract = require("tesseract.js");
 const { Jimp } = require("jimp");
 const { GoogleGenerativeAI } = require("@google/generative-ai");
+const { KeyRing, fingerprint, defaultRingPath, scrubSecrets } = require("./lib/keyRing");
+const geminiRetry = require("./lib/geminiRetry");
+const { Pace } = require("./lib/geminiPace");
 
 // Load initial environment
 require("dotenv").config({ path: path.join(__dirname, "..", ".env") });
@@ -39,6 +42,45 @@ if (!fs.existsSync(pipelineCacheDir)) fs.mkdirSync(pipelineCacheDir, { recursive
 if (!fs.existsSync(archiveDir)) fs.mkdirSync(archiveDir, { recursive: true });
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// --- The Gemini key ring, the pacer, and this process's dead keys ---
+//
+// One ring over `.env`, read fresh on every call, so a rotation made by a
+// previous run (or by hand between runs) gets picked up without a restart.
+// Set `ENV_KEY_RING_PATH` in `.env` to borrow a shared ring — mission-control's
+// `~/.env-key-ring/keys.env` is the same format, so one line here gives this
+// pipeline every key the `ask-google` tool already rotates through.
+const keys = new KeyRing({
+  filePath: defaultRingPath(path.join(projectRoot, ".env")),
+  log: (message) => console.log(`[Gemini Keys] ${message}`),
+});
+
+// The rate window and the per-key call budget. `dailyQuotaTarget` from the
+// settings panel drives the budget, since that number is the owner saying what
+// one key's day holds.
+const pace = new Pace();
+
+// Keys this PROCESS has proven unusable — revoked, wrong project, banned. Kept
+// for the life of the server so the ring steps over one instead of rotating
+// onto it, failing, and rotating again on every subsequent call.
+const deadKeys = new Set();
+
+// Dates with a `/api/process-stream` run in flight. The batch resume cache is
+// one file per date, read whole and written whole, so two concurrent runs on
+// one date would overwrite each other's finished batches.
+const runningDates = new Set();
+
+// Settle `.env` on exactly one active key at start-up. Two uncommented keys
+// make every label a lie, and dotenv silently takes the last.
+try {
+  const tidied = keys.tidy();
+  if (tidied.keys) {
+    console.log(`[Gemini Keys] Ring holds ${tidied.keys} key(s); active: ${tidied.active}.`);
+    if (tidied.dropped) console.log(`[Gemini Keys] Dropped ${tidied.dropped} duplicate line(s).`);
+  }
+} catch (err) {
+  console.error("[Gemini Keys] Could not tidy .env:", err.message);
+}
 
 // Locate a screenshot by filename, falling back to the archive/<date>/ folders
 // so finalized batches whose raw shots were archived can still preview/re-crop.
@@ -134,6 +176,7 @@ function recordGeminiCall(callDetail) {
     stats.dailyStats[utcDate] = {
       utcDate,
       totalCalls: 0,
+      totalRequests: 0,
       totalDurationMs: 0,
       avgDurationMs: 0,
       totalInputTokens: 0,
@@ -146,6 +189,12 @@ function recordGeminiCall(callDetail) {
 
   const day = stats.dailyStats[utcDate];
   day.totalCalls += 1;
+  // Google's meter counts REQUESTS. This one used to count calls, so a call
+  // that took five attempts to get past a 503 landed here as 1 — which is how
+  // 2026-07-27 recorded `totalCalls: 4` against 8 real requests, and why the
+  // quota gauge read 20% at a genuine 40%. `totalCalls` stays for the older
+  // days already in the file; `totalRequests` is the one the gauge reads.
+  day.totalRequests = (day.totalRequests || 0) + (callDetail.requests || 1);
   day.totalDurationMs += callDetail.durationMs;
   day.avgDurationMs = Math.round(day.totalDurationMs / day.totalCalls);
   day.totalInputTokens += callDetail.inputTokens;
@@ -492,76 +541,226 @@ async function runBackgroundOcr() {
 }
 
 // --- Gemini Retries & API Config ---
-async function generateContentWithRetry(apiKey, prompt, onStatusUpdate = null, maxRetries = 5, initialDelayMs = 2000, meta = {}) {
-  const genAI = new GoogleGenerativeAI(apiKey);
-  const modelName = "gemini-flash-latest";
-  const model = genAI.getGenerativeModel({ model: modelName });
-  
-  let attempt = 0;
+
+// Tries for a reply that ARRIVED and came back unusable — empty, or not the
+// JSON the caller asked for. Kept separate from the transient budget on
+// purpose: resending a prompt the model answers badly is not weather, and a
+// busy server said nothing at all about the prompt.
+const CONTENT_RETRIES = 3;
+
+const GEMINI_MODEL = "gemini-flash-latest";
+
+// `scrubSecrets` comes from `lib/keyRing` so the CLI applies the same guard.
+// It lived here for a while, which meant `processScreenshots.js` wrote raw
+// error text into the same stats file — a guard half the callers apply.
+
+/**
+ * Send one prompt, waiting out a busy server and rotating off a dry key.
+ *
+ * Replaces a loop that retried five times on `2000 * 2**attempt` — 2s, 4s, 8s,
+ * 16s, THIRTY SECONDS of patience — and that fed 503 and 429 through one
+ * branch on one budget. The two faults want opposite moves: a 503 clears if you
+ * wait, and a 429 on a free key never does, because the ceiling it names resets
+ * tomorrow. See `lib/geminiRetry.js` for the table.
+ *
+ * `meta.validate` optionally takes the reply text and returns a complaint
+ * string when it reads as unusable. That draws on `CONTENT_RETRIES`, never on
+ * the transient budget.
+ */
+async function generateContentWithRetry(prompt, onStatusUpdate = null, meta = {}) {
+  const note = (message) => {
+    console.log(`[Gemini API] ${message}`);
+    if (onStatusUpdate) onStatusUpdate(message);
+  };
+
+  let activeKey = keys.key() || process.env.GEMINI_API_KEY || "";
+  if (!activeKey) {
+    throw new Error("No GEMINI_API_KEY found. Add one in Settings, or put it in .env.");
+  }
+  const buildModel = (key) =>
+    new GoogleGenerativeAI(key).getGenerativeModel({ model: GEMINI_MODEL });
+  let model = buildModel(activeKey);
+
+  // Each OTHER key in the ring gets one shot at this call before the ring
+  // gives up. A ring of one still waits out a 503; it just cannot rotate.
+  const patience = new geminiRetry.Patience(Math.max(1, keys.size()));
   const startTime = Date.now();
-  if (onStatusUpdate) onStatusUpdate("Contacting Gemini API...");
+  let contentAttempt = 0;
+
+  note(keys.size() > 1
+    ? `Contacting Gemini (key "${(keys.active() || {}).label}", ${keys.size()} in the ring)...`
+    : "Contacting Gemini API...");
+
   while (true) {
+    // -- pace first, and outside the timing below -------------------------
+    // The wait belongs to us, not to the model, and folding it into the
+    // recorded duration would report every call as suddenly slower. A RETRY
+    // pays it too: a retry is a request, and the window counting them does not
+    // care why it went out.
+    //
+    // An anticipatory rotation deliberately does NOT spend a `rotations`
+    // budget. That budget means "each key gets one shot at THIS call"; charging
+    // it for a rotation that happened because a key filled up, between two
+    // calls that both worked, would eat a call's error headroom before the call
+    // had even been sent.
+    const keyId = fingerprint(activeKey);
+    if (pace.dueForRotation(keyId)) {
+      const spentOnKey = pace.spent(keyId);
+      const next = keys.rotate({ exhausted: activeKey, skip: Array.from(deadKeys) });
+      if (next) {
+        pace.clearKey(keyId);
+        activeKey = next.key;
+        model = buildModel(activeKey);
+        note(`Rotated ahead of the ceiling — ${spentOnKey} calls on the last key, now on "${next.label}".`);
+      }
+    }
+    // Wait for the slot and claim it in one step. Two streams reading the
+    // clock separately could each decide the window was clear and fire
+    // together; `reserve` queues them instead.
+    await pace.reserve(fingerprint(activeKey), (owed) => {
+      if (owed > 500) note(`Holding ${Math.round(owed / 1000)}s for the rate window.`);
+    });
+
+    const keyLabel = (keys.active() || {}).label || null;
+    patience.sent();
+
+    let result = null;
+    let responseText = "";
+    let usage = {};
+    let apiError = null;
     try {
-      const result = await model.generateContent(prompt);
+      result = await model.generateContent(prompt);
+      // `.text()` throws on a blocked or empty candidate, which classifies
+      // FATAL and stops — correct, since a safety block does not clear by
+      // being asked again.
+      responseText = result.response ? result.response.text() : "";
+      usage = (result.response && result.response.usageMetadata) || {};
+    } catch (error) {
+      apiError = error;
+    }
+
+    // -- the call broke -----------------------------------------------------
+    if (apiError) {
+      const status = geminiRetry.statusOf(apiError);
+      let move = patience.consider(apiError);
+
+      if (move === geminiRetry.Patience.ROTATE) {
+        if (KeyRing.isDeadKeyError(apiError)) {
+          note(`Key "${keyLabel}" (${fingerprint(activeKey)}) refused this call — skipping it for this run.`);
+          deadKeys.add(activeKey);
+        } else {
+          note(`Key "${keyLabel}" is out of room (${status || "429"}) — rotating rather than waiting out a ceiling that resets tomorrow.`);
+        }
+        const next = keys.rotate({ exhausted: activeKey, skip: Array.from(deadKeys) });
+        if (next) {
+          activeKey = next.key;
+          model = buildModel(activeKey);
+          // Deliberately NOT clearing any pace count here. An earlier version
+          // cleared `fingerprint(activeKey)` AFTER the reassignment, which
+          // wiped the count of the key being rotated ONTO — so a key already
+          // part-spent this session got a fresh 20-call budget and sailed past
+          // the ceiling the pacer exists to anticipate. The old key's count
+          // does not matter (it is dry); the new key's very much does.
+          patience.rotated();
+          continue;                       // retry AT ONCE, spending no transient try
+        }
+        move = geminiRetry.Patience.STOP;  // ring walked, nothing left to try
+      }
+
+      if (move === geminiRetry.Patience.WAIT && patience.afford(apiError)) {
+        note(patience.waitingLine(apiError));
+        await patience.rest();
+        continue;
+      }
+
       const durationMs = Date.now() - startTime;
-      const durationSec = parseFloat((durationMs / 1000).toFixed(2));
-      if (onStatusUpdate) onStatusUpdate(`Response received in ${durationSec}s.`);
-
-      const responseText = result.response ? result.response.text() : "";
-      const usage = (result.response && result.response.usageMetadata) || {};
-      const inputTokens = usage.promptTokenCount !== undefined ? usage.promptTokenCount : Math.ceil(prompt.length / 4);
-      const outputTokens = usage.candidatesTokenCount !== undefined ? usage.candidatesTokenCount : Math.ceil(responseText.length / 4);
-      const totalTokens = usage.totalTokenCount !== undefined ? usage.totalTokenCount : (inputTokens + outputTokens);
-
-      const callStat = {
+      note(patience.closingLine(apiError));
+      recordGeminiCall({
         type: meta.type || "general",
-        model: modelName,
+        model: GEMINI_MODEL,
         durationMs,
-        durationSec,
-        inputTokens,
-        outputTokens,
-        totalTokens,
+        durationSec: parseFloat((durationMs / 1000).toFixed(2)),
+        inputTokens: Math.ceil(prompt.length / 4),
+        outputTokens: 0,
+        totalTokens: Math.ceil(prompt.length / 4),
         timestamp: new Date().toISOString(),
         itemCount: meta.itemCount || 1,
-        status: "success",
-        attempts: attempt + 1
-      };
+        status: "error",
+        error: scrubSecrets(apiError.message),
+        httpStatus: status || null,
+        attempts: patience.transient + 1,
+        requests: patience.requests,
+        rotations: patience.rotations,
+        keyFingerprint: fingerprint(activeKey),
+      });
+      throw apiError;
+    }
 
-      recordGeminiCall(callStat);
-
-      return { result, durationMs, callStat };
-    } catch (error) {
-      attempt++;
-      const durationMs = Date.now() - startTime;
-      if (attempt >= maxRetries) {
+    // -- a reply arrived; is it usable? -------------------------------------
+    if (typeof meta.validate === "function") {
+      const complaint = meta.validate(responseText);
+      if (complaint) {
+        contentAttempt += 1;
+        if (contentAttempt < CONTENT_RETRIES) {
+          note(`Gemini returned an unusable reply (${complaint}) — attempt ${contentAttempt + 1}/${CONTENT_RETRIES}.`);
+          await geminiRetry.sleep(2000 * contentAttempt);
+          continue;
+        }
+        const durationMs = Date.now() - startTime;
+        const giveUp = new Error(`Gemini returned an unusable reply after ${CONTENT_RETRIES} attempts: ${complaint}`);
         recordGeminiCall({
           type: meta.type || "general",
-          model: modelName,
+          model: GEMINI_MODEL,
           durationMs,
           durationSec: parseFloat((durationMs / 1000).toFixed(2)),
           inputTokens: Math.ceil(prompt.length / 4),
-          outputTokens: 0,
-          totalTokens: Math.ceil(prompt.length / 4),
+          outputTokens: Math.ceil(responseText.length / 4),
+          totalTokens: Math.ceil((prompt.length + responseText.length) / 4),
           timestamp: new Date().toISOString(),
           itemCount: meta.itemCount || 1,
           status: "error",
-          error: error.message,
-          attempts: attempt
+          error: scrubSecrets(giveUp.message),
+          attempts: contentAttempt,
+          requests: patience.requests,
+          rotations: patience.rotations,
+          keyFingerprint: fingerprint(activeKey),
         });
-        throw error;
-      }
-      const isTransient = error.status === 503 || error.status === 429 || 
-                          (error.message && (error.message.includes("503") || error.message.includes("429") || error.message.includes("high demand") || error.message.includes("overloaded")));
-      if (isTransient) {
-        const delay = initialDelayMs * Math.pow(2, attempt - 1);
-        const warnMsg = `Transient error (${error.status || '503'}). Retrying attempt ${attempt}/${maxRetries} in ${Math.round(delay / 1000)}s...`;
-        console.warn(`[Gemini API] ${warnMsg}`);
-        if (onStatusUpdate) onStatusUpdate(warnMsg);
-        await new Promise(resolve => setTimeout(resolve, delay));
-      } else {
-        throw error;
+        throw giveUp;
       }
     }
+
+    const durationMs = Date.now() - startTime;
+    const durationSec = parseFloat((durationMs / 1000).toFixed(2));
+    note(`Response received in ${durationSec}s.`);
+
+    const inputTokens = usage.promptTokenCount !== undefined ? usage.promptTokenCount : Math.ceil(prompt.length / 4);
+    const outputTokens = usage.candidatesTokenCount !== undefined ? usage.candidatesTokenCount : Math.ceil(responseText.length / 4);
+    const totalTokens = usage.totalTokenCount !== undefined ? usage.totalTokenCount : (inputTokens + outputTokens);
+
+    const callStat = {
+      type: meta.type || "general",
+      model: GEMINI_MODEL,
+      durationMs,
+      durationSec,
+      inputTokens,
+      outputTokens,
+      totalTokens,
+      timestamp: new Date().toISOString(),
+      itemCount: meta.itemCount || 1,
+      status: "success",
+      attempts: patience.transient + contentAttempt + 1,
+      // Every HTTP request this call really sent. `attempts` counts what the
+      // GUI shows a person; THIS is what Google's meter counted, and reading
+      // one as the other is how a 20-request day showed as 4 calls.
+      requests: patience.requests,
+      rotations: patience.rotations,
+      // The fingerprint, never the label: a label is editable in `.env` and two
+      // could collide, merging two keys' budgets into one counter.
+      keyFingerprint: fingerprint(activeKey),
+    };
+
+    recordGeminiCall(callStat);
+    return { result, responseText, durationMs, callStat };
   }
 }
 
@@ -799,6 +998,10 @@ app.get("/api/status", async (req, res) => {
     if (fs.existsSync(pipelineCacheDir)) {
       for (const f of fs.readdirSync(pipelineCacheDir)) {
         if (!f.endsWith(".json")) continue;
+        // `<date>.partial.json` holds resumable Gemini batches, not a day's
+        // cache. It carries no `status`, so it fell through harmlessly — but a
+        // date named `2026-08-27.partial` reads as a bug waiting to be found.
+        if (f.endsWith(".partial.json")) continue;
         const d = f.replace(/\.json$/, "");
         if (activeDatesSet.has(d)) continue;
         try {
@@ -819,15 +1022,21 @@ app.get("/api/status", async (req, res) => {
       archivedInfo.sort((a, b) => b.date.localeCompare(a.date));
     }
 
-    const apiKey = process.env.GEMINI_API_KEY || "";
+    const ring = keys.describe();
+    const activeEntry = ring.find((e) => e.active) || ring[0] || null;
     const statsData = readGeminiStats();
     res.json({
       success: true,
       bookTitle: meta.bookTitle || "",
       recentBooks: Array.isArray(meta.recentBooks) ? meta.recentBooks : [],
       dailyQuotaTarget: meta.dailyQuotaTarget || 50,
-      apiKeyPresent: apiKey.length > 0,
-      apiKeyMasked: apiKey.length > 0 ? `${apiKey.slice(0, 6)}...${apiKey.slice(-4)}` : "",
+      apiKeyPresent: ring.length > 0,
+      // A LABEL and a FINGERPRINT, where this used to send
+      // `key.slice(0,6) + "..." + key.slice(-4)`. Those ten characters of a
+      // real key, published together, narrow a brute force more than nothing
+      // does — and the label is the thing a person actually recognises.
+      apiKeyMasked: activeEntry ? `${activeEntry.label} · ${activeEntry.fingerprint}` : "",
+      keyRing: ring,
       dates,
       datesInfo,
       archivedInfo,
@@ -909,10 +1118,19 @@ app.post("/api/settings", (req, res) => {
     }
     writeMeta(meta);
 
+    // An UPSERT into the key ring, never a rewrite of `.env`.
+    //
+    // This line used to be `writeFileSync(".env", "GEMINI_API_KEY=" + key)`,
+    // which replaced the whole file with one line — every commented-out spare
+    // in the ring destroyed, on a save the user meant as "use this key".
+    // `setKey` activates the key when the ring already knows it and appends a
+    // labelled entry when it does not.
     if (apiKey && apiKey.trim().length > 0) {
-      fs.writeFileSync(path.join(projectRoot, ".env"), `GEMINI_API_KEY=${apiKey.trim()}\n`, "utf8");
-      process.env.GEMINI_API_KEY = apiKey.trim();
+      keys.setKey(apiKey.trim(), (req.body.apiKeyLabel || "").trim() || null);
     }
+
+    // A changed daily target changes when the pacer rotates ahead of a ceiling.
+    pace.configure({ callsPerKey: meta.dailyQuotaTarget });
     
     res.json({ success: true, message: "Settings saved successfully!" });
   } catch (err) {
@@ -975,11 +1193,27 @@ app.get("/api/process-stream", async (req, res) => {
     res.write(`data: ${JSON.stringify({ type, message, ...extra })}\n\n`);
   };
 
+  // SINGLE FLIGHT per date. Two tabs on the same batch would each load
+  // `<date>.partial.json` into their own object and then write the whole file
+  // back — so each one's finished batches erase the other's, and both pay
+  // Gemini for work the other already did. One run per date at a time removes
+  // the race rather than trying to merge around it.
+  if (runningDates.has(date)) {
+    sendEvent("error", `A run for ${date} is already in progress. Wait for it to finish, or reload once it completes.`);
+    return res.end();
+  }
+  runningDates.add(date);
+  res.on("close", () => runningDates.delete(date));
+
   try {
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
+    // The RING decides which key runs, not the environment: a rotation written
+    // to `.env` by an earlier run has to take effect without a restart.
+    if (!keys.size() && !process.env.GEMINI_API_KEY) {
       sendEvent("error", "No Gemini API key found. Please save a valid key in the settings panel.");
       return res.end();
+    }
+    if (keys.size() > 1) {
+      sendEvent("log", `Key ring: ${keys.size()} keys, starting on "${(keys.active() || {}).label}".`);
     }
 
     sendEvent("log", `Initializing batch process for ${date}...`);
@@ -1100,15 +1334,30 @@ Return ONLY a JSON array of objects with this exact structure (no markdown fence
 ]`;
 
       try {
-        const { result, durationMs, callStat } = await generateContentWithRetry(apiKey, prompt, (statusMsg) => {
+        // The reply has to parse as a JSON array. Checking it HERE, through
+        // `validate`, means a malformed reply draws on its own budget of three
+        // and gets resent — where before, one bad reply threw straight out of
+        // `JSON.parse` and killed the whole run.
+        const cleanJson = (text) => text.replace(/```json/g, "").replace(/```/g, "").trim();
+        const { responseText, callStat } = await generateContentWithRetry(prompt, (statusMsg) => {
           sendEvent("log", `  [Gemini Naming] ${statusMsg}`);
           sendEvent("progress", `Gemini Naming: ${statusMsg}`, { value: 30 });
-        }, 5, 2000, { type: "naming", itemCount: imageItems.length });
+        }, {
+          type: "naming",
+          itemCount: imageItems.length,
+          validate: (text) => {
+            const cleaned = cleanJson(text);
+            if (!cleaned) return "empty reply";
+            try {
+              return Array.isArray(JSON.parse(cleaned)) ? null : "not a JSON array";
+            } catch (e) {
+              return `invalid JSON: ${e.message}`;
+            }
+          },
+        });
 
         if (callStat) processCallStats.push(callStat);
-        const responseText = result.response.text();
-        const cleanedText = responseText.replace(/```json/g, "").replace(/```/g, "").trim();
-        const suggestedList = JSON.parse(cleanedText);
+        const suggestedList = JSON.parse(cleanJson(responseText));
         
         // Map suggested names back to items
         const suggestionMap = {};
@@ -1212,10 +1461,48 @@ Return ONLY a JSON array of objects with this exact structure (no markdown fence
     const GEMINI_BATCH_SIZE = 50;
     const formattedTextParts = [];
 
+    // Batches that already came back, from this date's earlier run.
+    //
+    // The pipeline cache only ever got written after the whole loop, so a
+    // failure on batch 3 of 4 threw away batches 1 and 2 and the rerun paid for
+    // them again — at fifty pages a batch, the single most expensive thing a
+    // 503 could do here. Each finished batch now lands on disk at once, keyed
+    // by a hash of its own chunk so edited content re-runs and untouched
+    // content does not.
+    const partialPath = path.join(pipelineCacheDir, `${date}.partial.json`);
+    let partial = { date, batches: {} };
+    try {
+      if (fs.existsSync(partialPath)) {
+        const loaded = JSON.parse(fs.readFileSync(partialPath, "utf8"));
+        if (loaded && loaded.batches) partial = loaded;
+      }
+    } catch (err) {
+      console.error("[Gemini Batch] Unreadable partial cache, starting fresh:", err.message);
+    }
+    const chunkKey = (text) =>
+      require("crypto").createHash("sha256").update(text, "utf8").digest("hex").slice(0, 16);
+    const savePartial = () => {
+      try {
+        fs.writeFileSync(partialPath, JSON.stringify(partial, null, 2), "utf8");
+      } catch (err) {
+        console.error("[Gemini Batch] Could not save partial progress:", err.message);
+      }
+    };
+
     for (let i = 0; i < ocrResults.length; i += GEMINI_BATCH_SIZE) {
       const chunk = ocrResults.slice(i, i + GEMINI_BATCH_SIZE).join('\n');
-      sendEvent("log", `  → Contacting Gemini for batch ${Math.floor(i / GEMINI_BATCH_SIZE) + 1}...`);
-      
+      const cacheKey = chunkKey(chunk);
+      const batchLabel = Math.floor(i / GEMINI_BATCH_SIZE) + 1;
+
+      if (partial.batches[cacheKey]) {
+        formattedTextParts.push(partial.batches[cacheKey]);
+        sendEvent("log", `  → Batch ${batchLabel} already formatted on an earlier run — reusing it, no API call.`);
+        sendEvent("progress", `Gemini batch ${batchLabel}: reused`, { value: 30 + Math.round((Math.min(i + GEMINI_BATCH_SIZE, ocrResults.length) / ocrResults.length) * 50) });
+        continue;
+      }
+
+      sendEvent("log", `  → Contacting Gemini for batch ${batchLabel}...`);
+
       const prompt = `You are an OCR cleanup and formatting assistant for e-reader screenshots. I have a batch of texts for a specific day, and your task is to clean them up and format them.
 
 For each text entry provided, follow these rules:
@@ -1237,23 +1524,43 @@ ${chunk}
 Return ONLY the formatted text. Do not add any extra titles, commentary, or introductions.`;
 
       try {
-        const batchNum = Math.floor(i / GEMINI_BATCH_SIZE) + 1;
-        const { result, durationMs, callStat } = await generateContentWithRetry(apiKey, prompt, (statusMsg) => {
-          sendEvent("log", `  [Gemini Batch ${batchNum}] ${statusMsg}`);
-          sendEvent("progress", `Gemini Batch ${batchNum}: ${statusMsg}`, { value: 30 + Math.round((i / ocrResults.length) * 50) });
-        }, 5, 2000, { type: "transcription", itemCount: Math.min(GEMINI_BATCH_SIZE, ocrResults.length - i) });
+        const { responseText, callStat } = await generateContentWithRetry(prompt, (statusMsg) => {
+          sendEvent("log", `  [Gemini Batch ${batchLabel}] ${statusMsg}`);
+          sendEvent("progress", `Gemini Batch ${batchLabel}: ${statusMsg}`, { value: 30 + Math.round((i / ocrResults.length) * 50) });
+        }, {
+          type: "transcription",
+          itemCount: Math.min(GEMINI_BATCH_SIZE, ocrResults.length - i),
+          validate: (text) => (text && text.trim() ? null : "empty reply"),
+        });
 
         if (callStat) processCallStats.push(callStat);
-        const text = result.response.text().trim();
+        const text = responseText.trim();
         formattedTextParts.push(text);
-        sendEvent("progress", `Gemini batch: ${Math.floor(i / GEMINI_BATCH_SIZE) + 1} done`, { value: 30 + Math.round(((i + chunk.length) / ocrResults.length) * 50) });
+        // Banked before the next batch goes out, so whatever kills batch N+1
+        // cannot take batch N with it.
+        partial.batches[cacheKey] = text;
+        savePartial();
+        sendEvent("progress", `Gemini batch: ${batchLabel} done`, { value: 30 + Math.round((Math.min(i + GEMINI_BATCH_SIZE, ocrResults.length) / ocrResults.length) * 50) });
       } catch (err) {
-        sendEvent("error", `Gemini formatting error: ${err.message}`);
+        const done = Object.keys(partial.batches).length;
+        sendEvent("error", done
+          ? `Gemini formatting error on batch ${batchLabel}: ${err.message} — ${done} finished batch(es) kept, so a rerun resumes from here instead of paying for them again.`
+          : `Gemini formatting error: ${err.message}`);
         return res.end();
       }
     }
 
     const formattedOutput = formattedTextParts.join('\n\n');
+
+    // Every batch landed, so the resume file has nothing left to protect.
+    // Leaving it would make the next run reuse this day's text after the user
+    // edited the screenshots behind it.
+    try {
+      if (fs.existsSync(partialPath)) fs.unlinkSync(partialPath);
+    } catch (err) {
+      console.error("[Gemini Batch] Could not clear the partial cache:", err.message);
+    }
+
     sendEvent("log", "Process completed. Forwarding to review...");
 
     // Compute final Stage 2 timing & token metrics summary
@@ -1273,12 +1580,17 @@ Return ONLY the formatted text. Do not add any extra titles, commentary, or intr
     const utcDateToday = new Date().toISOString().split("T")[0];
     const todayStats = (statsHistory.dailyStats && statsHistory.dailyStats[utcDateToday]) || {};
     const callsTodayCount = (todayStats.totalCalls || 0);
+    // REQUESTS, not calls — see `recordGeminiCall`. Falls back to the call
+    // count for days recorded before the meter learned the difference.
+    const requestsTodayCount = (todayStats.totalRequests !== undefined
+      ? todayStats.totalRequests
+      : callsTodayCount);
     // Single source of truth: the user-configured daily target (Dev Stats meter).
     // Free-tier RPD for gemini-flash-latest is per-project and low since the
     // Dec-2025 cuts, so the authoritative number lives in the AI Studio console —
     // we track against the target the user set rather than a hardcoded 1,500.
     const freeTierQuotaLimit = meta.dailyQuotaTarget || 50;
-    const quotaUsedPct = parseFloat(((callsTodayCount / freeTierQuotaLimit) * 100).toFixed(2));
+    const quotaUsedPct = parseFloat(((requestsTodayCount / freeTierQuotaLimit) * 100).toFixed(2));
 
     const lastRunSummary = {
       date,
@@ -1313,9 +1625,11 @@ Return ONLY the formatted text. Do not add any extra titles, commentary, or intr
       },
       quotaStats: {
         callsToday: callsTodayCount,
+        requestsToday: requestsTodayCount,
         quotaLimit: freeTierQuotaLimit,
         quotaUsedPct
       },
+      keyRing: keys.describe(),
       calls: processCallStats
     };
     recordLastRunStats(lastRunSummary);
@@ -1372,6 +1686,11 @@ Return ONLY the formatted text. Do not add any extra titles, commentary, or intr
     console.error("SSE Error:", err);
     sendEvent("error", `An internal server error occurred: ${err.message}`);
     res.end();
+  } finally {
+    // Release the date whichever way the run ended. `res.on("close")` covers a
+    // browser that walks away mid-stream; this covers everything else, and
+    // deleting twice costs nothing.
+    runningDates.delete(date);
   }
 });
 

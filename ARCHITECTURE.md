@@ -35,8 +35,8 @@ Both modes share the same core processing logic. The GUI server re-implements th
 ├── .ocr_cache/             Auto-managed JSON cache: {text, isTextPage, mtime} per screenshot filename
 ├── .pipeline_cache/        Per-date pipeline state: {draftContent, illustrations, status} (git-ignored)
 ├── meta.json               Auto-managed GUI persistence: {bookTitle, recentBooks[], imageContexts}
-├── gemini_stats.json       Auto-managed Gemini API response time & token specs log (24hr UTC window stats)
-├── .env                    Secret: GEMINI_API_KEY (git-ignored, can be overwritten via GUI)
+├── gemini_stats.json       Auto-managed call/request telemetry, 24hr UTC windows (git-ignored)
+├── .env                    Secret: the GEMINI_API_KEY ring (git-ignored, as are .env.bak/.env.tmp)
 └── eng.traineddata         Bundled Tesseract English language model (required by tesseract.js)
 ```
 
@@ -111,7 +111,7 @@ User clicks "Show in System Explorer"
 | `colorDistance(c1, c2)` | Euclidean RGB distance, used by `checkHeaderColors` with a match threshold of `< 25` |
 | `ensureOcrCached(filename, filePath)` | Checks `.ocr_cache/{filename}.json` for matching mtime; on miss runs Tesseract **and** `checkHeaderColors`, writes `{text, isTextPage, mtime}`; returns `{text, isTextPage}` |
 | `getTesseractScheduler()` | Lazily initializes a shared Tesseract scheduler with `min(4, cpus-1)` workers |
-| `generateContentWithRetry(apiKey, prompt, maxRetries)` | Wraps Gemini `generateContent` with exponential backoff on 429/503 |
+| `generateContentWithRetry(prompt, onStatusUpdate, meta)` | Wraps Gemini `generateContent`: waits out a 503 for up to 10 min, rotates the key ring on a 429/403, stops on a bad request. See `gui/lib/`. |
 | `findOverlapFuzzy(prevText, newText)` | Fuzzy-matches the tail of prev against the head of new to detect/trim scroll overlaps |
 | `fuzzRatio(s1, s2)` | Pure-JS Levenshtein edit distance ratio (matches Python `fuzz.ratio` substitution cost=2 behavior) |
 | `readMeta() / writeMeta(data)` | Reads/writes `meta.json` for persistent GUI state (bookTitle, imageContexts) |
@@ -130,7 +130,7 @@ Contains the same algorithms (fuzzRatio, findOverlapFuzzy, checkHeaderColors, ge
 | `GET` | `/api/screenshot/:name` | Serve raw screenshot from `screenshots/`, falling back to `archive/<date>/` for cleared batches |
 | `GET` | `/api/cropped/:date/:name` | Serve cropped image from `output/YYYY-MM-DD Extracted Images/` |
 | `GET` | `/api/load-cache` | Return the saved `.pipeline_cache/<date>.json` for resuming/redoing a batch |
-| `POST` | `/api/settings` | Save `bookTitle` to `meta.json` (maintaining the 3-slot `recentBooks` queue), optionally overwrite `.env` with new API key |
+| `POST` | `/api/settings` | Save `bookTitle` to `meta.json` (maintaining the 3-slot `recentBooks` queue), optionally upsert an API key into the `.env` ring (never overwrites the file) |
 | `POST` | `/api/save-contexts` | Merge illustration hint text into `meta.json imageContexts` |
 | `POST` | `/api/upload` | Receive base64 image, write to `screenshots/`, run background OCR cache |
 | `GET` | `/api/process-stream` | SSE stream: full OCR → naming → dedup → Gemini text pipeline for a date |
@@ -233,13 +233,83 @@ Cropping logic (separate from detection) uses Jimp to find the bounding box of n
 
 ## Gemini API Quota Strategy
 
-Free tier limit: **20 requests/day** on `gemini-flash-latest`.
+Free tier limit: **20 requests/day** on `gemini-flash-latest` (the GUI's
+`dailyQuotaTarget` holds the authoritative number; AI Studio holds the real one).
 
 Calls per processing run:
 1. **Illustration naming**: always **1 call** (all illustrations bundled in one prompt)
 2. **Text cleanup**: **ceil(mergedPages / 50) calls** — typically 1–2 for a normal reading day
 
-To change the model, update `generateContentWithRetry` in **both** `gui/server.js` and `processScreenshots.js`. Current model: `gemini-flash-latest`.
+A *call* and a *request* differ, and the meter tracks both. One call that fought
+through a demand spike sends several requests, and the daily gauge reads
+`totalRequests` — reading `totalCalls` there is what let 2026-07-27 record 4
+calls against 8 real requests and show a 40% day as 20%.
+
+To change the model, update `GEMINI_MODEL` in `gui/server.js` and
+`generateContentWithRetry` in `processScreenshots.js`. Current model:
+`gemini-flash-latest`.
+
+---
+
+## Key Ring, Patience, and Pacing (`gui/lib/`)
+
+Three modules ported from ClipPipeline's `foundation/` and mission-control's
+`shared/env-key-ring`, added 2026-08-27 after a 503 investigation. Each one owns
+a decision the old single retry loop conflated.
+
+| module | owns | the failure it ends |
+|---|---|---|
+| `keyRing.js` | which key runs, and rotating to the next | one key in `.env`, and a run that dies when it runs dry |
+| `geminiRetry.js` | how long to wait, and whether waiting helps at all | 503 and 429 sharing one 30-second budget |
+| `geminiPace.js` | the 12s rate window, and rotating *before* a ceiling | the call that discovers the ceiling is a call that failed |
+
+### The policy, in one table
+
+| fault | waiting helps? | the move |
+|---|---|---|
+| 503 / 500 / dropped connection | yes | back off, jittered 15→30→60→120s, **10 minutes** total |
+| 429 / RESOURCE_EXHAUSTED | no — the key is dry | **rotate**, spending no transient try |
+| 403 / revoked key | never | rotate off it, mark it dead for the run |
+| 400 / bad request / safety block | never | stop at once |
+| anything unrecognised | unknown | stop — the report is how it stops being unrecognised |
+| a reply that ARRIVED unusable | n/a | its own budget of 3, never the transient one |
+
+### The `.env` layout IS the state
+
+Several keys, one uncommented, a label above each:
+
+```dotenv
+# Adam
+GEMINI_API_KEY=AIza...
+# D Data
+#GEMINI_API_KEY=AIza...
+```
+
+On a 429 the ring comments the dry key out, uncomments the next, and rewrites
+the file — so the next run *starts* on a key with room. Only the `#` moves;
+lines, order, labels and line endings survive exactly, and `.env.bak` holds the
+file as last written by hand.
+
+`ENV_KEY_RING_PATH` points the ring at a shared file instead — mission-control's
+`~/.env-key-ring/keys.env` is the same format, so one line borrows every key the
+`ask-google` tool already rotates through.
+
+**`.gitignore` must name `.env.bak` and `.env.tmp` explicitly.** The pattern
+`.env` matches that one name, and both of those carry real key values.
+
+### Resumable batches
+
+Each finished text-cleanup batch lands in `.pipeline_cache/<date>.partial.json`
+before the next one goes out, keyed by a hash of its own chunk. A failure on
+batch 3 of 4 no longer discards batches 1 and 2, and the rerun reuses them for
+zero API calls. The file gets deleted once the whole run lands.
+
+### Tests
+
+`npm test` — 106 assertions across `gui/lib/__tests__/`, no network and no real
+`.env`. `retryLoop.test.js` stubs the SDK and the clock, so ten minutes of
+patience costs no wall time, and drives the loop through a 503 spike, a dry key,
+a revoked key, a ring gone dry, and an unusable reply.
 
 ---
 
