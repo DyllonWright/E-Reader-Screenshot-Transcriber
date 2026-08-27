@@ -227,7 +227,11 @@
                   <input type="password" id="input-api-key" placeholder="Enter new API key to overwrite...">
                   <button type="button" id="btn-toggle-key" class="btn btn-secondary btn-small">Show</button>
                 </div>
-                <small id="key-status-text" class="form-help text-muted">Key is configured inside your project.</small>
+                <div id="key-status" class="key-status">
+                  <span class="key-status-dot" aria-hidden="true"></span>
+                  <span id="key-status-text" class="key-status-label">Key is configured inside your project.</span>
+                  <span id="key-status-backups" class="key-status-backups" hidden></span>
+                </div>
               </div>
 
               <button type="submit" id="btn-save-settings" class="btn btn-secondary btn-full">

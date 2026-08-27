@@ -1022,21 +1022,26 @@ app.get("/api/status", async (req, res) => {
       archivedInfo.sort((a, b) => b.date.localeCompare(a.date));
     }
 
-    const ring = keys.describe();
-    const activeEntry = ring.find((e) => e.active) || ring[0] || null;
+    // `summary()`, not `describe()`. The full ring names every account the
+    // owner holds keys under, and the browser only ever rendered them as a
+    // trailing list nobody reads — while putting all thirteen in the JSON, in
+    // devtools, and in any screenshot of this panel.
+    const ringSummary = keys.summary();
     const statsData = readGeminiStats();
     res.json({
       success: true,
       bookTitle: meta.bookTitle || "",
       recentBooks: Array.isArray(meta.recentBooks) ? meta.recentBooks : [],
       dailyQuotaTarget: meta.dailyQuotaTarget || 50,
-      apiKeyPresent: ring.length > 0,
-      // A LABEL and a FINGERPRINT, where this used to send
-      // `key.slice(0,6) + "..." + key.slice(-4)`. Those ten characters of a
-      // real key, published together, narrow a brute force more than nothing
-      // does — and the label is the thing a person actually recognises.
-      apiKeyMasked: activeEntry ? `${activeEntry.label} · ${activeEntry.fingerprint}` : "",
-      keyRing: ring,
+      apiKeyPresent: ringSummary.total > 0,
+      // Two redactions deep. This once sent `key.slice(0,6) + "..." +
+      // key.slice(-4)` — ten characters of the real key — then the account
+      // label in full. Now: a starred label and a sha256 prefix, neither of
+      // which reverses to anything.
+      apiKeyMasked: ringSummary.active
+        ? `${ringSummary.active.label} · ${ringSummary.active.fingerprint}`
+        : "",
+      keyRing: ringSummary,
       dates,
       datesInfo,
       archivedInfo,
@@ -1629,7 +1634,8 @@ Return ONLY the formatted text. Do not add any extra titles, commentary, or intr
         quotaLimit: freeTierQuotaLimit,
         quotaUsedPct
       },
-      keyRing: keys.describe(),
+      // Redacted here too — this lands in gemini_stats.json on disk.
+      keyRing: keys.summary(),
       calls: processCallStats
     };
     recordLastRunStats(lastRunSummary);

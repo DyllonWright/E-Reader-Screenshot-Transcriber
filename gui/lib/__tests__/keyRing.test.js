@@ -206,6 +206,51 @@ console.log("\n== scrubSecrets: one guard, both clients ==");
   ok("handles null", scrubSecrets(null) === "");
 }
 
+console.log("\n== redactLabel: recognisable, not readable ==");
+{
+  const { redactLabel } = require("../keyRing.js");
+  const r = redactLabel("sanders.llc147@gmail.com");
+  ok("keeps the first two characters", r.startsWith("sa"), r);
+  ok("keeps the domain", r.endsWith("@gmail.com"), r);
+  ok("hides the rest of the local part", r.indexOf("nders.llc147") === -1, r);
+  ok("length does not shrink (no free hint)", r.length === "sanders.llc147@gmail.com".length, r);
+
+  const n = redactLabel("daathdata #2");
+  ok("non-email labels redact too", n.startsWith("da") && n.indexOf("athdata") === -1, n);
+
+  ok("unlabelled passes through", redactLabel("(unlabelled)") === "(unlabelled)");
+  ok("empty passes through", redactLabel("") === "(unlabelled)");
+  ok("null is safe", redactLabel(null) === "(unlabelled)");
+  ok("a one-char local part still redacts", redactLabel("a@b.co").indexOf("•") !== -1, redactLabel("a@b.co"));
+}
+
+console.log("\n== summary(): what actually crosses the wire ==");
+{
+  const p = tmpEnv("# alice@example.com\nGEMINI_API_KEY=AAA\n# bob@example.com\n#GEMINI_API_KEY=BBB\n# carol@example.com\n#GEMINI_API_KEY=CCC\n");
+  const r = new KeyRing({ filePath: p, log: quiet });
+  const s = r.summary();
+  const blob = JSON.stringify(s);
+
+  ok("counts the ring", s.total === 3, s);
+  ok("counts the spares", s.backups === 2, s);
+  ok("names the active key", s.active.fingerprint === require("../keyRing.js").fingerprint("AAA"));
+
+  ok("NO key value crosses", !/AAA|BBB|CCC/.test(blob), blob);
+  ok("NO inactive label crosses", blob.indexOf("bob") === -1 && blob.indexOf("carol") === -1, blob);
+  ok("active label is redacted", blob.indexOf("alice@example.com") === -1, blob);
+  ok("active label stays recognisable", s.active.label.startsWith("al") && s.active.label.endsWith("@example.com"), s.active.label);
+
+  const empty = new KeyRing({ filePath: tmpEnv(""), log: quiet }).summary();
+  ok("empty ring -> active null", empty.active === null && empty.total === 0 && empty.backups === 0, empty);
+
+  const solo = new KeyRing({ filePath: tmpEnv("# solo\nGEMINI_API_KEY=ONE\n"), log: quiet }).summary();
+  ok("single key -> zero backups", solo.total === 1 && solo.backups === 0, solo);
+
+  // describe() keeps full labels — it feeds the terminal, where the owner is.
+  ok("describe() still carries full labels for the console",
+     JSON.stringify(r.describe()).indexOf("bob@example.com") !== -1);
+}
+
 console.log("\n== defaultRingPath ==");
 {
   const { defaultRingPath } = require("../keyRing.js");

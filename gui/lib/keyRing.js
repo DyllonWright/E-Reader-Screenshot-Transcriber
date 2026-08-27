@@ -104,6 +104,37 @@ function fingerprint(key) {
 }
 
 /**
+ * A label with its middle starred out — enough to recognise, not to read.
+ *
+ * Labels in a personal ring are account names, usually the email the key was
+ * minted under. Printing thirteen of them in the GUI put the owner's whole
+ * account list on screen, in the `/api/status` JSON, and in any screenshot or
+ * screen share. None of that is a key, and all of it is nobody's business.
+ *
+ * Keeps the first two characters and the domain, since recognising WHICH
+ * account is live is the entire job of this string:
+ *
+ *     sanders.llc147@gmail.com  ->  sa••••••••••@gmail.com
+ *     daathdata #2              ->  da••••••••
+ */
+function redactLabel(label) {
+  const text = String(label == null ? "" : label).trim();
+  // A key with no label has nothing to hide, and `(u••••••••••` reads as a
+  // bug rather than as discretion.
+  if (!text || text === UNLABELLED) return UNLABELLED;
+
+  const at = text.lastIndexOf("@");
+  if (at > 0) {
+    const local = text.slice(0, at);
+    const domain = text.slice(at);           // includes the "@"
+    const head = local.slice(0, Math.min(2, local.length));
+    return `${head}${"•".repeat(Math.max(3, local.length - head.length))}${domain}`;
+  }
+  const head = text.slice(0, Math.min(2, text.length));
+  return `${head}${"•".repeat(Math.max(3, text.length - head.length))}`;
+}
+
+/**
  * Strip anything key-shaped out of text bound for a file or a log.
  *
  * Lives HERE rather than beside one caller because both clients write error
@@ -514,6 +545,27 @@ class KeyRing {
       active: e.active,
     }));
   }
+
+  /**
+   * What the GUI gets: the live key, redacted, and a count of the rest.
+   *
+   * `describe()` keeps full labels for the terminal, where the owner is
+   * already sitting. This is the shape that crosses the wire, because the
+   * browser has no use for twelve account names it only renders as noise —
+   * and every one of them would sit in the JSON, in devtools, and in a
+   * screenshot.
+   */
+  summary() {
+    const keys = this.ring();
+    const live = keys.find((e) => e.active) || keys[0] || null;
+    return {
+      active: live
+        ? { label: redactLabel(live.label), fingerprint: fingerprint(live.key) }
+        : null,
+      total: keys.length,
+      backups: Math.max(0, keys.length - 1),
+    };
+  }
 }
 
 KeyRing.fingerprint = fingerprint;
@@ -526,6 +578,7 @@ module.exports = {
   defaultRingPath,
   fingerprint,
   scrubSecrets,
+  redactLabel,
   isQuotaError,
   isDeadKeyError,
   shouldRotate,

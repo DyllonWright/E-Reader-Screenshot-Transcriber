@@ -613,6 +613,46 @@ document.addEventListener("DOMContentLoaded", () => {
   const inputApiKey = document.getElementById("input-api-key");
   const btnToggleKey = document.getElementById("btn-toggle-key");
   const keyStatusText = document.getElementById("key-status-text");
+  const keyStatusRow = document.getElementById("key-status");
+  const keyStatusBackups = document.getElementById("key-status-backups");
+
+  /**
+   * Paint the key-ring status row.
+   *
+   * `summary` is `{active: {label, fingerprint}, total, backups}` from the
+   * server, already redacted there — the browser never receives the other
+   * labels, so it cannot leak them. Pass null when no key is configured.
+   */
+  function renderKeyStatus(summary) {
+    if (!keyStatusRow || !keyStatusText) return;
+
+    if (!summary || !summary.active) {
+      keyStatusRow.classList.remove("is-live");
+      keyStatusRow.removeAttribute("title");
+      keyStatusText.textContent = "No key configured — add one above, or put it in .env";
+      if (keyStatusBackups) keyStatusBackups.hidden = true;
+      return;
+    }
+
+    keyStatusRow.classList.add("is-live");
+    keyStatusText.textContent = "";
+
+    const label = document.createElement("span");
+    label.textContent = summary.active.label;
+    const fp = document.createElement("span");
+    fp.className = "key-status-fp";
+    fp.textContent = ` ${summary.active.fingerprint}`;
+    keyStatusText.append(label, fp);
+
+    const spares = summary.backups || 0;
+    if (keyStatusBackups) {
+      keyStatusBackups.hidden = spares === 0;
+      keyStatusBackups.textContent = `+${spares} backup${spares === 1 ? "" : "s"}`;
+    }
+    keyStatusRow.title = spares
+      ? `${spares} spare key${spares === 1 ? "" : "s"} rotate in automatically when this one hits its daily limit.`
+      : "Only one key loaded. Add more to .env so a run survives hitting the daily limit.";
+  }
 
   const inputFolderBar = document.getElementById("input-folder-bar");
   const filePicker = document.getElementById("input-file-picker");
@@ -701,20 +741,12 @@ document.addEventListener("DOMContentLoaded", () => {
       if (ifbCount) ifbCount.textContent = appState.totalScreenshots;
       renderRecentBooks();
       renderArchivedSection();
-      if (data.apiKeyPresent) {
-        // The ring, by label and fingerprint. `apiKeyMasked` used to carry ten
-        // real characters of the key; it now carries none.
-        const ring = Array.isArray(data.keyRing) ? data.keyRing : [];
-        keyStatusText.textContent = ring.length > 1
-          ? `Active Key: ${data.apiKeyMasked}  ·  ${ring.length} in ring (${ring.filter(k => !k.active).map(k => k.label).join(", ")} on deck)`
-          : `Active Key: ${data.apiKeyMasked}`;
-        keyStatusText.classList.remove("text-muted");
-        keyStatusText.classList.add("text-brand-cyan");
-      } else {
-        keyStatusText.textContent = "No key configured. Create .env or enter above.";
-        keyStatusText.classList.remove("text-brand-cyan");
-        keyStatusText.classList.add("text-muted");
-      }
+      // The active key, redacted, plus a count of the spares behind it. This
+      // used to print every label in the ring, which on a thirteen-key ring
+      // meant the owner's whole account list sat on screen to say "a key
+      // works". The server now sends only the summary, so the full list is
+      // not in the page, the JSON, or a screenshot of either.
+      renderKeyStatus(data.apiKeyPresent ? data.keyRing : null);
  
       // Handle Background OCR Progress Heartbeat Widget
       const ocrCard = document.getElementById("ocr-progress-card");

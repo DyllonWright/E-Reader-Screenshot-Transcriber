@@ -532,6 +532,80 @@ textarea:focus {
   color: var(--text-dim);
 }
 
+/* --- Key ring status ---------------------------------------------------
+   One line: a live dot, the active key redacted, and how many spares stand
+   behind it. This replaced a wrapping cyan paragraph that listed every
+   account label in the ring — thirteen addresses on screen to say "a key is
+   working". */
+.key-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 7px 10px;
+  border: 1px solid var(--border-light);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+
+.key-status-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-dim);
+}
+
+/* Green reads as GO. A key that works is not a warning. */
+.key-status.is-live .key-status-dot {
+  background: var(--accent-green);
+  box-shadow: 0 0 7px hsla(150, 80%, 45%, 0.85);
+  animation: key-status-breathe 3.2s ease-in-out infinite;
+}
+
+.key-status-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  letter-spacing: 0.2px;
+}
+
+.key-status.is-live .key-status-label {
+  color: var(--text-muted);
+}
+
+.key-status-fp {
+  color: var(--text-dim);
+  opacity: 0.75;
+}
+
+.key-status-backups {
+  flex: none;
+  margin-left: auto;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: hsla(195, 100%, 43%, 0.12);
+  border: 1px solid hsla(195, 100%, 55%, 0.25);
+  color: var(--accent-cyan);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+
+@keyframes key-status-breathe {
+  0%, 100% {
+    opacity: 0.65;
+  }
+
+  50% {
+    opacity: 1;
+  }
+}
+
 .password-input-wrapper {
   display: flex;
   gap: 8px;
@@ -2016,7 +2090,8 @@ select option:disabled {
   .star,
   .bg-grad-1,
   .bg-grad-2,
-  .bg-grad-3 {
+  .bg-grad-3,
+  .key-status.is-live .key-status-dot {
     animation: none !important;
   }
 }
