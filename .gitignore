@@ -11,3 +11,17 @@ meta.json
 *.ini
 /.claude
 /.pipeline_cache
+# --- key-ring guard ---
+# `.env` as a pattern matches that ONE name. A rotating key ring writes
+# `.env.bak` before its first rewrite and `.env.tmp` during it, and a hand
+# copy lands as `.env.bak-YYYY-MM-DD`. Every one of those carries real key
+# values, and none of them match `.env`. Learned in ClipPipeline, 2026-08-16.
+.env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+
+# Run telemetry: rewritten on every run, and it publishes the timestamps of
+# reading sessions. The local file stays; the repo stops carrying it.
+gemini_stats.json
